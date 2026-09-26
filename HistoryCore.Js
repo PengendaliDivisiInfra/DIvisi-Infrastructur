@@ -4,29 +4,59 @@ var History = {
   stack: [],
   idx: -1,
   _suppress: false,
+  _inited: false,
 
   init: function() {
     if (this._inited) return;
     this._inited = true;
     var s = this;
-    this.push('Initial');
 
-    // Hook markDirty → auto push snapshot
-    var orig = window.markDirty;
-    if (typeof orig === 'function' && !orig._hsWrapped) {
+    // Hook markDirty → push snapshot 'Edit'
+    var origDirty = window.markDirty;
+    if (typeof origDirty === 'function' && !origDirty._hsWrapped) {
       window.markDirty = function() {
-        orig.apply(this, arguments);
+        origDirty.apply(this, arguments);
         if (!s._suppress) s.push('Edit');
       };
       window.markDirty._hsWrapped = true;
     }
+
+    // Hook pullFromSheet → push Initial setelah pull selesai
+    var origPull = window.pullFromSheet;
+    if (typeof origPull === 'function' && !origPull._hsWrapped) {
+      window.pullFromSheet = function() {
+        var p = origPull.apply(this, arguments);
+        if (p && typeof p.then === 'function') {
+          return p.then(function(r) {
+            setTimeout(function() {
+              if (s.stack.length === 0) {
+                s.push('Initial');
+                console.log('[History] 📸 Initial snapshot (from pull)');
+              }
+            }, 300);
+            return r;
+          });
+        }
+        return p;
+      };
+      window.pullFromSheet._hsWrapped = true;
+    }
+
+    // Fallback 5s: push Initial kalau belum ada
+    setTimeout(function() {
+      if (s.stack.length === 0) {
+        s.push('Initial');
+        console.log('[History] 📸 Initial snapshot (fallback)');
+      }
+    }, 5000);
+
     console.log('[History] ✅ Init OK, MAX=' + this.MAX);
   },
 
-  snap: function() {
+  snap: function(label) {
     return {
       ts: Date.now(),
-      label: arguments[0] || 'Edit',
+      label: label || 'Edit',
       db: JSON.parse(JSON.stringify(DB)),
       settings: JSON.parse(JSON.stringify(SETTINGS)),
       activeProjectId: APP_STATE.activeProjectId
@@ -34,16 +64,14 @@ var History = {
   },
 
   push: function(label) {
-    // Hapus semua redo di depan
     if (this.idx < this.stack.length - 1) {
       this.stack = this.stack.slice(0, this.idx + 1);
     }
     this.stack.push(this.snap(label));
-    if (this.stack.length > this.MAX) {
-      this.stack.shift();
-    }
+    if (this.stack.length > this.MAX) this.stack.shift();
     this.idx = this.stack.length - 1;
     if (typeof this.updateUI === 'function') this.updateUI();
+    console.log('[History] push:' + label + ' | idx=' + this.idx + ' | total=' + this.stack.length);
   },
 
   restore: function(s) {
@@ -86,5 +114,8 @@ var History = {
   }
 };
 window.History = History;
+
+// BOOTSTRAP
+History.init();
 console.log('[HistoryCore] loaded.');
 </script>
