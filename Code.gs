@@ -2100,8 +2100,8 @@ function doGet(e) {
     'ScheduleJs_06_GanttEngine', 'ScheduleJs_07_GanttView', 'ScheduleJs_08_UIHelpers',
     'ScheduleJs_09_UndoBulk', 'ScheduleJs_10_SyncManager', 'ScheduleJs_11_Reporting',
     'ScheduleJs_12_RenderMain',
-    'TrackingJs', 'ReportingJs', 'ProgressWizardJs', 'PortfolioTimelineJs',
-    'KeyboardShortcutsJs', 'Fase1COverride', 'MultiUserJs'
+    'TrackingJs', 'ProgressWizardJs', 'PortfolioTimelineJs',
+    'KeyboardShortcutsJs', 'KbShortcuts2Js', 'Fase1COverride', 'MultiUserJs'
   ];
 
   var allJs = '';
@@ -2178,4 +2178,72 @@ function doPostApi(action, payload) {
       message: 'Error server: ' + err.message
     });
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DIAGNOSTIC v2 — Cari modul dengan SYNTAX ERROR
+   Jalankan dari Apps Script Editor
+   ═══════════════════════════════════════════════════════════ */
+function findBrokenModule(){
+  var files = [
+    'LoadingIndicatorJs', 'EmptyStateJs', 'SheetSyncFixJs', 'PerformanceCacheJs',
+    'AppJs',
+    'ScheduleJs_01_Calendar', 'ScheduleJs_02_CPM',
+    'ScheduleJs_03_Autosave', 'ScheduleJs_04_Resource', 'ScheduleJs_05_Baseline',
+    'ScheduleJs_06_GanttEngine', 'ScheduleJs_07_GanttView', 'ScheduleJs_08_UIHelpers',
+    'ScheduleJs_09_UndoBulk', 'ScheduleJs_10_SyncManager', 'ScheduleJs_11_Reporting',
+    'ScheduleJs_12_RenderMain',
+    'TrackingJs', 'ProgressWizardJs',
+    'PortfolioTimelineJs', 'KeyboardShortcutsJs', 'Fase1COverride', 'MultiUserJs',
+    'ReportCoreJs', 'ReportExecutiveJs'
+  ];
+
+  var cumulative = '';
+  var brokenAt = null;
+
+  console.log('══════ FIND BROKEN MODULE ══════');
+
+  for (var i = 0; i < files.length; i++){
+    var name = files[i];
+    try {
+      var content = HtmlService.createHtmlOutputFromFile(name).getContent();
+
+      // SAMA seperti doGet: strip wrapper
+      var bodyMatch = content.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+      if (bodyMatch) content = bodyMatch[1];
+      content = content.replace(/^\s*<script[^>]*>/i, '');
+      content = content.replace(/<\/script>\s*$/i, '');
+
+      var marker = '\n\n/* ═══ MODULE: ' + name + ' ═══ */\n';
+      cumulative += marker + content;
+
+      // TEST: coba parse JS cumulative
+      try {
+        new Function(cumulative);
+        console.log('OK  ' + name + ' (modul: ' + content.length + ', total: ' + cumulative.length + ')');
+      } catch(e){
+        console.log('');
+        console.log('========================================');
+        console.log('BROKEN DI: ' + name);
+        console.log('Error: ' + e.message);
+        console.log('Panjang modul: ' + content.length + ' chars');
+        console.log('Total sampai sini: ' + cumulative.length + ' chars');
+        console.log('========================================');
+        console.log('');
+        brokenAt = name;
+        break;
+      }
+    } catch(e){
+      console.log('WARN  Baca ' + name + ' gagal: ' + e.message);
+    }
+  }
+
+  console.log('');
+  console.log('═══════════════════════════════════════');
+  if (brokenAt){
+    console.log('RESULT: Modul rusak = ' + brokenAt);
+  } else {
+    console.log('RESULT: Semua modul OK secara syntax');
+  }
+  console.log('═══════════════════════════════════════');
 }
