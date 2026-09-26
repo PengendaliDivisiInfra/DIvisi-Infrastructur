@@ -1,0 +1,944 @@
+<script>
+/* =====================================================================
+   ScheduleJs_12_RenderMain.html — MAIN RENDERER & CRUD HANDLERS
+   Tanggung jawab:
+   - Render semua tabel utama (Proyek, Resources, AHSP, WBS, dst)
+   - Modal form untuk CRUD
+   - Event binding untuk tombol + / edit / delete
+   - Simpan ke DB + markDirty() + auto push opsional
+   ===================================================================== */
+
+/* =====================================================================
+   BAGIAN 1 — HELPER RENDER
+   ===================================================================== */
+
+/** Buat elemen <th> tabel */
+function th_(text, cls){
+  return '<th' + (cls ? ' class="' + cls + '"' : '') + '>' + esc(text) + '</th>';
+}
+
+/** Buat elemen <td> */
+function td_(html, cls){
+  return '<td' + (cls ? ' class="' + cls + '"' : '') + '>' + html + '</td>';
+}
+
+/** Render tabel dari array of rows */
+function renderTable_(tableId, headers, rows, opts){
+  const tbl = document.getElementById(tableId);
+  if (!tbl) return;
+  opts = opts || {};
+  
+  if (!rows || !rows.length){
+    tbl.innerHTML =
+      '<thead><tr>' + headers.map(h => th_(h.label)).join('') + '</tr></thead>' +
+      '<tbody><tr><td colspan="' + headers.length + '" class="empty" style="text-align:center;padding:30px;color:#8fa3c4;font-style:italic">' +
+      esc(opts.emptyMsg || 'Belum ada data') + '</td></tr></tbody>';
+    return;
+  }
+
+  let html = '<thead><tr>';
+  headers.forEach(h => {
+    html += '<th' + (h.align ? ' style="text-align:' + h.align + '"' : '') + '>' + esc(h.label) + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+
+  rows.forEach((row, i) => {
+    html += '<tr>';
+    headers.forEach(h => {
+      let val = h.get ? h.get(row, i) : row[h.key];
+      if (val === null || val === undefined) val = '';
+      if (h.align === 'right' && typeof val === 'number') val = fmtNum(val, h.dec || 0);
+      html += '<td' + (h.align ? ' style="text-align:' + h.align + '"' : '') + (h.cls ? ' class="' + h.cls + '"' : '') + '>' + val + '</td>';
+    });
+    html += '</tr>';
+  });
+  html += '</tbody>';
+  tbl.innerHTML = html;
+}
+
+/** Badge jenis resource */
+function badgeJenis_(jenis){
+  const j = String(jenis || '').toLowerCase();
+  const cls = j === 'upah' ? 'b-upah' : j === 'bahan' ? 'b-bahan' : j === 'alat' ? 'b-alat' : 'b-info';
+  return '<span class="badge ' + cls + '">' + esc(jenis || '—') + '</span>';
+}
+
+/* =====================================================================
+   BAGIAN 2 — RENDER DASHBOARD
+   ===================================================================== */
+function renderDashboard(){
+  const wrap = document.getElementById('kpiWrap');
+  if (!wrap) return;
+
+  const proj = getActiveProject();
+  const resCount = (DB.master_resources || []).length;
+  const ahspCount = (DB.ahsp_headers || []).length;
+  const wbsCount = (DB.project_wbs || []).filter(w => w.project_id === APP_STATE.activeProjectId && !num(w.is_group)).length;
+  const progCount = (DB.progress || []).filter(p => p.project_id === APP_STATE.activeProjectId).length;
+
+  const totalRAB = (DB.project_wbs || [])
+    .filter(w => w.project_id === APP_STATE.activeProjectId && !num(w.is_group))
+    .reduce((s, w) => s + num(w.volume_rab), 0);
+
+  wrap.innerHTML = [
+    '<div class="kpi"><div class="lbl">Proyek Aktif</div><div class="val">' + esc(proj ? (proj.kode || '—') : '—') + '</div><div class="sub">' + esc(proj ? (proj.nama || '') : 'Pilih proyek') + '</div></div>',
+    '<div class="kpi k2"><div class="lbl">Master Resources</div><div class="val">' + resCount + '</div><div class="sub">Upah · Bahan · Alat</div></div>',
+    '<div class="kpi k3"><div class="lbl">Template AHSP</div><div class="val">' + ahspCount + '</div><div class="sub">Standar Permen PUPR</div></div>',
+    '<div class="kpi k5"><div class="lbl">Item WBS</div><div class="val">' + wbsCount + '</div><div class="sub">' + (wbsCount ? 'Item pada proyek aktif' : 'Belum ada item') + '</div></div>'
+  ].join('');
+
+  // Alert wrap
+  const alertWrap = document.getElementById('alertWrap');
+  if (alertWrap){
+    const alerts = [];
+    if (!DB.projects || !DB.projects.length) alerts.push('Belum ada proyek. Buka tab <b>🏗 Proyek</b> dan tambahkan.');
+    if (!resCount) alerts.push('Belum ada resource. Buka tab <b>🧱 Master Resources</b> dan tambahkan.');
+    if (!ahspCount) alerts.push('Belum ada template AHSP. Buka tab <b>📐 AHSP</b> dan tambahkan.');
+    if (!wbsCount && APP_STATE.activeProjectId) alerts.push('Proyek aktif belum memiliki item WBS. Buka tab <b>🗂 WBS / BQ</b> dan tambahkan.');
+
+    if (!alerts.length){
+      alertWrap.innerHTML = '<div class="alert ok"><span>✅</span><div><b>Semua siap!</b><br>Data dasar sudah tersedia. Anda bisa mulai input WBS, AHSP, dan progress.</div></div>';
+    } else {
+      alertWrap.innerHTML = alerts.map(a => '<div class="alert info"><span>💡</span><div>' + a + '</div></div>').join('');
+    }
+  }
+}
+
+/* =====================================================================
+   BAGIAN 3 — RENDER EXECUTIVE
+   ===================================================================== */
+function renderExecutive(){
+  const kpiWrap = document.getElementById('execKPI');
+  if (!kpiWrap) return;
+
+  const projects = DB.projects || [];
+  const totalKontrak = projects.reduce((s, p) => s + num(p.nilai_kontrak), 0);
+
+  kpiWrap.innerHTML = [
+    '<div class="kpi"><div class="lbl">Total Proyek</div><div class="val">' + projects.length + '</div><div class="sub">Portofolio</div></div>',
+    '<div class="kpi k2"><div class="lbl">Nilai Kontrak Total</div><div class="val">' + fmtRp(totalKontrak) + '</div><div class="sub">Semua proyek</div></div>',
+    '<div class="kpi k3"><div class="lbl">Proyek Aktif</div><div class="val">' + projects.filter(p => p.status === 'Berjalan').length + '</div><div class="sub">Status: Berjalan</div></div>',
+    '<div class="kpi k5"><div class="lbl">Rata-rata Nilai</div><div class="val">' + fmtRp(projects.length ? totalKontrak / projects.length : 0) + '</div><div class="sub">Per proyek</div></div>'
+  ].join('');
+
+  // Tabel portfolio
+  const tbl = document.getElementById('tblExecPortfolio');
+  if (tbl){
+    if (!projects.length){
+      tbl.innerHTML = '<thead><tr><th>Kode</th><th>Nama</th><th>Lokasi</th><th>Nilai Kontrak</th><th>Status</th></tr></thead>' +
+                      '<tbody><tr><td colspan="5" class="empty" style="text-align:center;padding:30px">Belum ada proyek</td></tr></tbody>';
+    } else {
+      let html = '<thead><tr><th>Kode</th><th>Nama</th><th>Lokasi</th><th style="text-align:right">Nilai Kontrak</th><th>Status</th></tr></thead><tbody>';
+      projects.forEach(p => {
+        html += '<tr class="exec-row" data-project="' + esc(p.id) + '" style="cursor:pointer">';
+        html += td_(esc(p.kode || '—'));
+        html += td_(esc(p.nama || '—'));
+        html += td_(esc(p.lokasi || '—'));
+        html += td_(fmtRp(p.nilai_kontrak), 'num');
+        html += td_(esc(p.status || '—'));
+        html += '</tr>';
+      });
+      html += '</tbody>';
+      tbl.innerHTML = html;
+
+      // Klik baris → set proyek aktif
+      tbl.querySelectorAll('.exec-row').forEach(r => {
+        r.addEventListener('click', function(){
+          APP_STATE.activeProjectId = this.dataset.project;
+          toast('Proyek aktif: ' + (findById(DB.projects, this.dataset.project) || {}).nama);
+          renderExecutive();
+          renderDashboard();
+        });
+      });
+    }
+  }
+}
+
+/* =====================================================================
+   BAGIAN 4 — RENDER MASTER RESOURCES
+   ===================================================================== */
+function renderResources(){
+  const tbl = document.getElementById('tblRes');
+  if (!tbl) return;
+
+  let list = DB.master_resources || [];
+
+  const filterJenis = (document.getElementById('fResJenis') || {}).value || '';
+  const filterSearch = String((document.getElementById('fResSearch') || {}).value || '').toLowerCase();
+
+  if (filterJenis) list = list.filter(r => String(r.jenis).toLowerCase() === filterJenis);
+  if (filterSearch) list = list.filter(r =>
+    String(r.kode || '').toLowerCase().includes(filterSearch) ||
+    String(r.nama || '').toLowerCase().includes(filterSearch)
+  );
+
+  renderTable_('tblRes',
+    [
+      { label: 'Kode', get: r => '<code style="color:#7cb3ff;font-weight:700">' + esc(r.kode || '—') + '</code>' },
+      { label: 'Nama', get: r => esc(r.nama || '—') },
+      { label: 'Jenis', get: r => badgeJenis_(r.jenis) },
+      { label: 'Satuan', get: r => esc(r.satuan || '—') },
+      { label: 'Harga RAB', align: 'right', get: r => fmtRp(r.harga_rab) },
+      { label: 'Harga RAP', align: 'right', get: r => fmtRp(r.harga_rap) },
+      { label: 'Kap. Harian', align: 'right', get: r => num(r.kapasitas_harian) || '—' },
+      { label: 'Aksi', get: r =>
+        '<button class="btn btn-sm" onclick="openResourceModal(\'' + esc(r.id) + '\')" title="Edit">✏️</button> ' +
+        '<button class="btn btn-sm" onclick="deleteResource_(\'' + esc(r.id) + '\')" title="Hapus" style="color:#f87171">🗑</button>'
+      }
+    ],
+    list,
+    { emptyMsg: filterJenis || filterSearch ? 'Tidak ada resource yang cocok' : 'Belum ada resource. Klik + Resource untuk menambahkan.' }
+  );
+}
+
+/* =====================================================================
+   BAGIAN 5 — RENDER AHSP
+   ===================================================================== */
+function renderAhsp(){
+  const tbl = document.getElementById('tblAhsp');
+  if (!tbl) return;
+
+  renderTable_('tblAhsp',
+    [
+      { label: 'Kode', get: r => '<code style="color:#7cb3ff;font-weight:700">' + esc(r.kode || '—') + '</code>' },
+      { label: 'Nama', get: r => esc(r.nama || '—') },
+      { label: 'Kategori', get: r => esc(r.kategori || '—') },
+      { label: 'Satuan', get: r => esc(r.satuan || '—') },
+      { label: 'Overhead', align: 'right', get: r => fmtNum(r.overhead, 2) + '%' },
+      { label: 'Margin', align: 'right', get: r => fmtNum(r.margin, 2) + '%' },
+      { label: 'Aksi', get: r =>
+        '<button class="btn btn-sm" onclick="openAhspModal(\'' + esc(r.id) + '\')">✏️</button> ' +
+        '<button class="btn btn-sm" onclick="deleteAhsp_(\'' + esc(r.id) + '\')" style="color:#f87171">🗑</button>'
+      }
+    ],
+    DB.ahsp_headers || [],
+    { emptyMsg: 'Belum ada template AHSP' }
+  );
+
+  // Isi dropdown ahspProjSel
+  const sel = document.getElementById('ahspProjSel');
+  if (sel){
+    sel.innerHTML = '<option value="">— Pilih Proyek —</option>';
+    (DB.projects || []).forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = (p.kode || '') + ' — ' + (p.nama || '');
+      if (p.id === APP_STATE.activeProjectId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+}
+
+/* =====================================================================
+   BAGIAN 6 — RENDER WBS
+   ===================================================================== */
+function renderWbs(){
+  const tbl = document.getElementById('tblWbs');
+  if (!tbl) return;
+
+  const wbsList = (DB.project_wbs || []).filter(w => w.project_id === APP_STATE.activeProjectId);
+  wbsList.sort((a, b) => num(a.urut) - num(b.urut));
+
+  renderTable_('tblWbs',
+    [
+      { label: 'Kode WBS', get: w => '<code style="color:#7cb3ff;font-weight:700">' + esc(w.kode_wbs || '—') + '</code>' },
+      { label: 'Uraian', get: w => esc(w.uraian || '—') },
+      { label: 'Satuan', get: w => esc(w.satuan || '—') },
+      { label: 'Vol RAB', align: 'right', get: w => fmtNum(w.volume_rab, 2) },
+      { label: 'Vol RAP', align: 'right', get: w => fmtNum(w.volume_rap, 2) },
+      { label: 'Durasi', align: 'right', get: w => num(w.durasi_hari) ? num(w.durasi_hari) + ' hari' : '—' },
+      { label: 'Mulai', get: w => esc(w.tgl_mulai_rencana || w.start_date || '—') },
+      { label: 'Selesai', get: w => esc(w.tgl_selesai_rencana || w.finish_date || '—') },
+      { label: 'Kritis', get: w => num(w.is_critical) === 1 ? '<span style="color:#f87171;font-weight:700">🔥</span>' : '' },
+      { label: 'Aksi', get: w =>
+        '<button class="btn btn-sm" onclick="openWbsModal(\'' + esc(w.id) + '\')">✏️</button> ' +
+        '<button class="btn btn-sm" onclick="deleteWbs_(\'' + esc(w.id) + '\')" style="color:#f87171">🗑</button>'
+      }
+    ],
+    wbsList,
+    { emptyMsg: APP_STATE.activeProjectId ? 'Belum ada item WBS pada proyek ini' : 'Pilih proyek aktif terlebih dahulu' }
+  );
+}
+
+/* =====================================================================
+   BAGIAN 7 — RENDER SCHEDULE (Simple)
+   ===================================================================== */
+function renderSchedule(){
+  /* ── Install Task Inspector hook (idempotent) ── */
+  if (typeof TaskInspector !== 'undefined' && TaskInspector.installHook) {
+    try { TaskInspector.installHook(); } catch(e) { console.error('[renderSchedule] Inspector install:', e); }
+  }
+
+  /* ── Render Gantt Chart ── */
+  if (typeof renderGantt === 'function') {
+    try { renderGantt(); } catch(e) { console.error('[renderSchedule] Gantt error:', e); }
+  }
+
+  /* ── Render Resource Loading ── */
+  if (typeof renderResourceLoading === 'function') {
+    try { renderResourceLoading(); } catch(e) { console.error('[renderSchedule] Resource error:', e); }
+  }
+
+  /* ── Render Baseline ── */
+  if (typeof renderBaseline === 'function') {
+    try { renderBaseline(); } catch(e) { console.error('[renderSchedule] Baseline error:', e); }
+  }
+
+  /* ── Tracking toolbar & slip table ── */
+  if (typeof Tracking !== 'undefined') {
+    try { if (Tracking.injectToolbar) Tracking.injectToolbar(); } catch(e) {}
+    try { if (Tracking.renderSlipTable) Tracking.renderSlipTable(); } catch(e) {}
+  }
+
+  const wbsList = (DB.project_wbs || []).filter(function(w) {
+    return String(w.project_id) === String(APP_STATE.activeProjectId) && !num(w.is_group);
+  });
+
+  // KPI
+  const kpiWrap = document.getElementById('schedKPI');
+  if (kpiWrap){
+    const total = wbsList.length;
+    const critical = wbsList.filter(function(w) { return num(w.is_critical) === 1; }).length;
+    const manual = wbsList.filter(function(w) { return String(w.schedule_mode || 'auto') === 'manual'; }).length;
+    const start = wbsList.reduce(function(s, w) {
+      return (!s || (w.tgl_mulai_rencana && w.tgl_mulai_rencana < s)) ? w.tgl_mulai_rencana : s;
+    }, '');
+    const finish = wbsList.reduce(function(s, w) {
+      return (!s || (w.tgl_selesai_rencana && w.tgl_selesai_rencana > s)) ? w.tgl_selesai_rencana : s;
+    }, '');
+    kpiWrap.innerHTML = [
+      '<div class="kpi"><div class="lbl">Total Task</div><div class="val">' + total + '</div></div>',
+      '<div class="kpi k4"><div class="lbl">Critical</div><div class="val">' + critical + '</div></div>',
+      '<div class="kpi k3"><div class="lbl">Manual</div><div class="val">' + manual + '</div></div>',
+      '<div class="kpi k2"><div class="lbl">Durasi</div><div class="val">' + esc(start || '-') + ' → ' + esc(finish || '-') + '</div></div>'
+    ].join('');
+  }
+
+  // Critical Path table
+  const critList = wbsList.filter(function(w) { return num(w.is_critical) === 1; });
+  renderTable_('tblCritical',
+    [
+      { label: 'Kode', get: function(w) { return '<code style="color:#fca5a5">' + esc(w.kode_wbs || '-') + '</code>'; } },
+      { label: 'Uraian', get: function(w) { return esc(w.uraian || '-'); } },
+      { label: 'Mulai', get: function(w) { return esc(w.tgl_mulai_rencana || '-'); } },
+      { label: 'Selesai', get: function(w) { return esc(w.tgl_selesai_rencana || '-'); } },
+      { label: 'Durasi', align: 'right', get: function(w) { return num(w.durasi_hari); } }
+    ],
+    critList,
+    { emptyMsg: 'Belum ada task pada jalur kritis' }
+  );
+}
+
+/* =====================================================================
+   BAGIAN 8 — RENDER CALENDARS
+   ===================================================================== */
+function renderCalendars(){
+  const tbl = document.getElementById('tblCalendars');
+  if (!tbl) return;
+  renderTable_('tblCalendars',
+    [
+      { label: 'Kode', get: c => '<code style="color:#7cb3ff">' + esc(c.kode || '—') + '</code>' },
+      { label: 'Nama', get: c => esc(c.nama || '—') },
+      { label: 'Work Days', get: c => '<code>' + esc(c.work_days || '—') + '</code>' },
+      { label: 'Jam/Hari', align: 'right', get: c => num(c.jam_per_hari) },
+      { label: 'Default', get: c => num(c.is_default) === 1 ? '<span class="badge b-ok">DEFAULT</span>' : '' },
+      { label: 'Aksi', get: c =>
+        '<button class="btn btn-sm" onclick="openCalendarModal(\'' + esc(c.id) + '\')">✏️</button> ' +
+        '<button class="btn btn-sm" onclick="deleteCalendar_(\'' + esc(c.id) + '\')" style="color:#f87171">🗑</button>'
+      }
+    ],
+    DB.working_calendars || [],
+    { emptyMsg: 'Belum ada kalender' }
+  );
+}
+
+/* =====================================================================
+   BAGIAN 9 — RENDER HOLIDAYS
+   ===================================================================== */
+function renderHolidays(){
+  const tbl = document.getElementById('tblHolidays');
+  if (!tbl) return;
+  renderTable_('tblHolidays',
+    [
+      { label: 'Tanggal', get: h => esc(h.tanggal || '—') },
+      { label: 'Nama', get: h => esc(h.nama || '—') },
+      { label: 'Jenis', get: h => esc(h.jenis || '—') },
+      { label: 'Aksi', get: h =>
+        '<button class="btn btn-sm" onclick="openHolidayModal(\'' + esc(h.id) + '\')">✏️</button> ' +
+        '<button class="btn btn-sm" onclick="deleteHoliday_(\'' + esc(h.id) + '\')" style="color:#f87171">🗑</button>'
+      }
+    ],
+    DB.holidays || [],
+    { emptyMsg: 'Belum ada hari libur' }
+  );
+
+  // Isi filter kalender
+  const sel = document.getElementById('fHolCal');
+  if (sel){
+    sel.innerHTML = '<option value="">— Semua Kalender —</option>';
+    (DB.working_calendars || []).forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = (c.kode || '') + ' — ' + (c.nama || '');
+      sel.appendChild(opt);
+    });
+  }
+}
+
+/* =====================================================================
+   BAGIAN 10 — RENDER ANALYSIS
+   ===================================================================== */
+function renderAnalysis(){
+  const tbl = document.getElementById('tblAnalysis');
+  if (!tbl) return;
+  const wbsList = (DB.project_wbs || []).filter(w => w.project_id === APP_STATE.activeProjectId && !num(w.is_group));
+  renderTable_('tblAnalysis',
+    [
+      { label: 'Kode', get: w => esc(w.kode_wbs || '—') },
+      { label: 'Uraian', get: w => esc(w.uraian || '—') },
+      { label: 'Vol RAB', align: 'right', get: w => fmtNum(w.volume_rab, 2) },
+      { label: 'Vol RAP', align: 'right', get: w => fmtNum(w.volume_rap, 2) },
+      { label: 'Deviasi Vol', align: 'right', get: w => {
+        const d = num(w.volume_rap) - num(w.volume_rab);
+        const cls = d > 0 ? 'pos' : d < 0 ? 'neg' : '';
+        return '<span class="' + cls + '">' + fmtNum(d, 2) + '</span>';
+      }}
+    ],
+    wbsList,
+    { emptyMsg: 'Belum ada data untuk dianalisis' }
+  );
+}
+
+/* =====================================================================
+   BAGIAN 11 — RENDER PROGRESS
+   ===================================================================== */
+function renderProgress(){
+  const tbl = document.getElementById('tblProg');
+  if (!tbl) return;
+  const list = (DB.progress || []).filter(p => p.project_id === APP_STATE.activeProjectId);
+  renderTable_('tblProg',
+    [
+      { label: 'Minggu', get: p => esc(p.minggu || '—') },
+      { label: 'WBS', get: p => {
+        const w = findById(DB.project_wbs, p.wbs_id);
+        return w ? '<code>' + esc(w.kode_wbs || '') + '</code> ' + esc(w.uraian || '') : esc(p.wbs_id || '—');
+      }},
+      { label: 'Volume', align: 'right', get: p => fmtNum(p.volume, 2) },
+      { label: 'Tanggal', get: p => esc(p.tanggal || '—') },
+      { label: 'Aksi', get: p =>
+        '<button class="btn btn-sm" onclick="openProgressModal(\'' + esc(p.id) + '\')">✏️</button> ' +
+        '<button class="btn btn-sm" onclick="deleteProgress_(\'' + esc(p.id) + '\')" style="color:#f87171">🗑</button>'
+      }
+    ],
+    list,
+    { emptyMsg: 'Belum ada progress mingguan' }
+  );
+}
+
+/* =====================================================================
+   BAGIAN 12 — RENDER PROJECTS
+   ===================================================================== */
+function renderProjects(){
+  const tbl = document.getElementById('tblProj');
+  if (!tbl) return;
+  renderTable_('tblProj',
+    [
+      { label: 'Kode', get: p => '<code style="color:#7cb3ff;font-weight:700">' + esc(p.kode || '—') + '</code>' },
+      { label: 'Nama', get: p => esc(p.nama || '—') },
+      { label: 'Lokasi', get: p => esc(p.lokasi || '—') },
+      { label: 'Owner', get: p => esc(p.owner || '—') },
+      { label: 'Nilai Kontrak', align: 'right', get: p => fmtRp(p.nilai_kontrak) },
+      { label: 'Tgl Mulai', get: p => esc(p.tgl_mulai || '—') },
+      { label: 'Tgl Selesai', get: p => esc(p.tgl_selesai || '—') },
+      { label: 'Status', get: p => {
+        const cls = p.status === 'Berjalan' ? 'b-ok' : p.status === 'Selesai' ? 'b-info' : 'b-warn';
+        return '<span class="badge ' + cls + '">' + esc(p.status || '—') + '</span>';
+      }},
+      { label: 'Aksi', get: p =>
+        '<button class="btn btn-sm" onclick="openProjectModal(\'' + esc(p.id) + '\')">✏️</button> ' +
+        '<button class="btn btn-sm" onclick="deleteProject_(\'' + esc(p.id) + '\')" style="color:#f87171">🗑</button>'
+      }
+    ],
+    DB.projects || [],
+    { emptyMsg: 'Belum ada proyek' }
+  );
+}
+
+/* =====================================================================
+   BAGIAN 13 — RENDER SETTINGS (User & Connection)
+   ===================================================================== */
+function renderSettings(){
+  const tbl = document.getElementById('tblUsers');
+  if (!tbl) return;
+  renderTable_('tblUsers',
+    [
+      { label: 'Username', get: u => '<code>' + esc(u.username || '—') + '</code>' },
+      { label: 'Nama', get: u => esc(u.nama || '—') },
+      { label: 'Email', get: u => esc(u.email || '—') },
+      { label: 'Role', get: u => {
+        const cls = u.role === 'superadmin' ? 'b-danger' : u.role === 'admin' ? 'b-warn' : 'b-info';
+        return '<span class="badge ' + cls + '">' + esc(u.role || '—') + '</span>';
+      }},
+      { label: 'Proyek', get: u => esc(String(u.project_ids || '').slice(0, 40)) },
+      { label: 'Aktif', get: u => num(u.aktif) === 1 ? '<span style="color:#4ade80">✓</span>' : '<span style="color:#f87171">✗</span>' }
+    ],
+    DB.project_users || [],
+    { emptyMsg: 'Belum ada user' }
+  );
+
+  // Isi field settings
+  const setOh = document.getElementById('setOh');
+  if (setOh) setOh.value = SETTINGS.overhead_default || 0;
+  const setPpn = document.getElementById('setPpn');
+  if (setPpn) setPpn.value = SETTINGS.ppn_default || 11;
+}
+
+/* =====================================================================
+   BAGIAN 14 — RENDER RECON & LEMBAR (Placeholder ringan)
+   ===================================================================== */
+function renderRecon(){
+  const tbl = document.getElementById('tblRecon');
+  if (!tbl) return;
+  tbl.innerHTML = '<thead><tr><th>Fitur</th><th>Status</th></tr></thead><tbody>' +
+    '<tr><td>Rekonsiliasi RAB→RAP</td><td><span class="badge b-info">Modul terpisah</span></td></tr></tbody>';
+}
+
+function renderLembar(){
+  const wrap = document.getElementById('ahspLembarWrap');
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="empty">Pilih proyek dan item AHSP, lalu klik Cetak.</div>';
+
+  const selProj = document.getElementById('lembarProjSel');
+  if (selProj){
+    selProj.innerHTML = '<option value="">— Pilih Proyek —</option>';
+    (DB.projects || []).forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = (p.kode || '') + ' — ' + (p.nama || '');
+      selProj.appendChild(opt);
+    });
+  }
+  const selAhsp = document.getElementById('lembarAhspSel');
+  if (selAhsp){
+    selAhsp.innerHTML = '<option value="">— Pilih AHSP —</option>';
+    (DB.ahsp_headers || []).forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.id;
+      opt.textContent = (a.kode || '') + ' — ' + (a.nama || '');
+      selAhsp.appendChild(opt);
+    });
+  }
+}
+
+/* =====================================================================
+   BAGIAN 15 — MODAL CRUD
+   ===================================================================== */
+
+/** Helper: buat field input untuk modal */
+function fField_(label, name, value, type, attrs){
+  type = type || 'text';
+  attrs = attrs || '';
+  return '<div class="field" style="margin-bottom:10px">' +
+    '<label class="f">' + esc(label) + '</label>' +
+    '<input type="' + type + '" name="' + name + '" value="' + esc(value || '') + '" ' + attrs + ' />' +
+    '</div>';
+}
+
+function fSelect_(label, name, value, options){
+  let html = '<div class="field" style="margin-bottom:10px"><label class="f">' + esc(label) + '</label><select name="' + name + '">';
+  options.forEach(o => {
+    html += '<option value="' + esc(o.value) + '"' + (String(o.value) === String(value) ? ' selected' : '') + '>' + esc(o.label) + '</option>';
+  });
+  html += '</select></div>';
+  return html;
+}
+
+/** Modal: Proyek */
+function openProjectModal(id){
+  const p = id ? findById(DB.projects, id) : {};
+  const html =
+    fField_('Kode', 'kode', p.kode || '', 'text', 'required') +
+    fField_('Nama Proyek', 'nama', p.nama || '', 'text', 'required') +
+    fField_('Lokasi', 'lokasi', p.lokasi || '') +
+    fField_('Owner', 'owner', p.owner || '') +
+    fField_('Nilai Kontrak', 'nilai_kontrak', p.nilai_kontrak || 0, 'number') +
+    fField_('PPN (%)', 'ppn', p.ppn || 11, 'number') +
+    fField_('Tgl Mulai', 'tgl_mulai', p.tgl_mulai || '', 'date') +
+    fField_('Tgl Selesai', 'tgl_selesai', p.tgl_selesai || '', 'date') +
+    fSelect_('Status', 'status', p.status || 'Berjalan', [
+      { value: 'Berjalan', label: 'Berjalan' },
+      { value: 'Selesai', label: 'Selesai' },
+      { value: 'Ditunda', label: 'Ditunda' }
+    ]);
+
+  openModal(id ? 'Edit Proyek' : 'Proyek Baru', html, function(){
+    const data = collectModal_();
+    if (!data.kode || !data.nama){ toast('Kode & Nama wajib diisi', 'error'); return; }
+    if (id){
+      Object.assign(p, data);
+    } else {
+      data.id = 'prj_' + Math.random().toString(36).slice(2, 12);
+      data.updated_at = new Date().toISOString();
+      data.updated_by = APP_STATE.user ? APP_STATE.user.username : 'system';
+      DB.projects.push(data);
+    }
+    closeModal();
+    markDirty();
+    renderProjects();
+    populateProjectSelect();
+    toast(id ? '✅ Proyek diupdate' : '✅ Proyek dibuat');
+  });
+}
+
+/** Modal: Resource */
+function openResourceModal(id){
+  const r = id ? findById(DB.master_resources, id) : {};
+  const html =
+    fField_('Kode', 'kode', r.kode || '', 'text', 'required') +
+    fField_('Nama', 'nama', r.nama || '', 'text', 'required') +
+    fSelect_('Jenis', 'jenis', r.jenis || 'upah', [
+      { value: 'upah', label: 'Upah' },
+      { value: 'bahan', label: 'Bahan' },
+      { value: 'alat', label: 'Alat' }
+    ]) +
+    fField_('Satuan', 'satuan', r.satuan || '') +
+    fField_('Harga RAB', 'harga_rab', r.harga_rab || 0, 'number') +
+    fField_('Harga RAP', 'harga_rap', r.harga_rap || 0, 'number') +
+    fField_('Kapasitas Harian', 'kapasitas_harian', r.kapasitas_harian || 0, 'number');
+
+  openModal(id ? 'Edit Resource' : 'Resource Baru', html, function(){
+    const data = collectModal_();
+    if (!data.kode || !data.nama){ toast('Kode & Nama wajib diisi', 'error'); return; }
+    if (id){
+      Object.assign(r, data);
+    } else {
+      data.id = 'res_' + Math.random().toString(36).slice(2, 12);
+      data.updated_at = new Date().toISOString();
+      DB.master_resources.push(data);
+    }
+    closeModal();
+    markDirty();
+    renderResources();
+    toast(id ? '✅ Resource diupdate' : '✅ Resource dibuat');
+  });
+}
+
+/** Modal: AHSP */
+function openAhspModal(id){
+  const a = id ? findById(DB.ahsp_headers, id) : {};
+  const html =
+    fField_('Kode', 'kode', a.kode || '', 'text', 'required') +
+    fField_('Nama', 'nama', a.nama || '', 'text', 'required') +
+    fField_('Kategori', 'kategori', a.kategori || '') +
+    fField_('Satuan', 'satuan', a.satuan || '') +
+    fField_('Overhead (%)', 'overhead', a.overhead || 0, 'number') +
+    fField_('Margin (%)', 'margin', a.margin || 0, 'number') +
+    fField_('Sumber', 'sumber', a.sumber || 'Permen PUPR');
+
+  openModal(id ? 'Edit AHSP' : 'AHSP Baru', html, function(){
+    const data = collectModal_();
+    if (!data.kode || !data.nama){ toast('Kode & Nama wajib diisi', 'error'); return; }
+    if (id){
+      Object.assign(a, data);
+    } else {
+      data.id = 'ahsp_' + Math.random().toString(36).slice(2, 12);
+      DB.ahsp_headers.push(data);
+    }
+    closeModal();
+    markDirty();
+    renderAhsp();
+    toast(id ? '✅ AHSP diupdate' : '✅ AHSP dibuat');
+  });
+}
+
+/** Modal: WBS */
+function openWbsModal(id){
+  const w = id ? findById(DB.project_wbs, id) : { project_id: APP_STATE.activeProjectId };
+  if (!w.project_id){ toast('Pilih proyek aktif dulu', 'error'); return; }
+  const html =
+    fField_('Kode WBS', 'kode_wbs', w.kode_wbs || '', 'text', 'required') +
+    fField_('Uraian', 'uraian', w.uraian || '', 'text', 'required') +
+    fField_('Satuan', 'satuan', w.satuan || '') +
+    fField_('Volume RAB', 'volume_rab', w.volume_rab || 0, 'number') +
+    fField_('Volume RAP', 'volume_rap', w.volume_rap || 0, 'number') +
+    fField_('Durasi (hari)', 'durasi_hari', w.durasi_hari || 1, 'number') +
+    fField_('Predecessor', 'predecessor', w.predecessor || '', 'text', 'placeholder="mis: 1.2FS+2"') +
+    fSelect_('Schedule Mode', 'schedule_mode', w.schedule_mode || 'auto', [
+      { value: 'auto', label: 'Auto' },
+      { value: 'manual', label: 'Manual' }
+    ]);
+
+  openModal(id ? 'Edit WBS' : 'Item WBS Baru', html, function(){
+    const data = collectModal_();
+    if (!data.kode_wbs || !data.uraian){ toast('Kode & Uraian wajib diisi', 'error'); return; }
+    if (id){
+      Object.assign(w, data);
+    } else {
+      data.id = 'wbs_' + Math.random().toString(36).slice(2, 12);
+      data.project_id = APP_STATE.activeProjectId;
+      data.urut = (DB.project_wbs || []).filter(x => x.project_id === data.project_id).length + 1;
+      data.is_group = 0;
+      DB.project_wbs.push(data);
+    }
+    closeModal();
+    markDirty();
+    renderWbs();
+    toast(id ? '✅ WBS diupdate' : '✅ WBS dibuat');
+  });
+}
+
+/** Modal: Progress */
+function openProgressModal(id){
+  const p = id ? findById(DB.progress, id) : { project_id: APP_STATE.activeProjectId };
+  const wbsOpts = (DB.project_wbs || [])
+    .filter(w => w.project_id === APP_STATE.activeProjectId && !num(w.is_group))
+    .map(w => ({ value: w.id, label: (w.kode_wbs || '') + ' — ' + (w.uraian || '') }));
+
+  const html =
+    fSelect_('WBS', 'wbs_id', p.wbs_id || '', [{ value: '', label: '— Pilih WBS —' }].concat(wbsOpts)) +
+    fField_('Minggu ke-', 'minggu', p.minggu || 1, 'number') +
+    fField_('Volume', 'volume', p.volume || 0, 'number') +
+    fField_('Tanggal', 'tanggal', p.tanggal || new Date().toISOString().slice(0, 10), 'date');
+
+  openModal(id ? 'Edit Progress' : 'Progress Baru', html, function(){
+    const data = collectModal_();
+    if (!data.wbs_id){ toast('Pilih WBS', 'error'); return; }
+    if (id){
+      Object.assign(p, data);
+    } else {
+      data.id = 'prg_' + Math.random().toString(36).slice(2, 12);
+      data.project_id = APP_STATE.activeProjectId;
+      DB.progress.push(data);
+    }
+    closeModal();
+    markDirty();
+    renderProgress();
+    toast(id ? '✅ Progress diupdate' : '✅ Progress dibuat');
+  });
+}
+
+/** Modal: Calendar */
+function openCalendarModal(id){
+  const c = id ? findById(DB.working_calendars, id) : {};
+  const html =
+    fField_('Kode', 'kode', c.kode || '', 'text', 'required') +
+    fField_('Nama', 'nama', c.nama || '', 'text', 'required') +
+    fField_('Work Days', 'work_days', c.work_days || '1,2,3,4,5', 'text', 'placeholder="1,2,3,4,5"') +
+    fField_('Jam/Hari', 'jam_per_hari', c.jam_per_hari || 8, 'number') +
+    fSelect_('Default', 'is_default', c.is_default || 0, [
+      { value: 0, label: 'Tidak' },
+      { value: 1, label: 'Ya' }
+    ]);
+
+  openModal(id ? 'Edit Kalender' : 'Kalender Baru', html, function(){
+    const data = collectModal_();
+    if (!data.kode || !data.nama){ toast('Kode & Nama wajib', 'error'); return; }
+    data.is_default = num(data.is_default);
+    if (id){
+      Object.assign(c, data);
+    } else {
+      data.id = 'wcal_' + Math.random().toString(36).slice(2, 12);
+      DB.working_calendars.push(data);
+    }
+    closeModal();
+    markDirty();
+    renderCalendars();
+    toast(id ? '✅ Kalender diupdate' : '✅ Kalender dibuat');
+  });
+}
+
+/** Modal: Holiday */
+function openHolidayModal(id){
+  const h = id ? findById(DB.holidays, id) : {};
+  const calOpts = [{ value: '', label: '— Semua Kalender —' }].concat(
+    (DB.working_calendars || []).map(c => ({ value: c.id, label: c.kode + ' — ' + c.nama }))
+  );
+  const html =
+    fField_('Tanggal', 'tanggal', h.tanggal || '', 'date', 'required') +
+    fField_('Nama', 'nama', h.nama || '', 'text', 'required') +
+    fSelect_('Jenis', 'jenis', h.jenis || 'nasional', [
+      { value: 'nasional', label: 'Nasional' },
+      { value: 'daerah', label: 'Daerah' },
+      { value: 'cuti_bersama', label: 'Cuti Bersama' }
+    ]) +
+    fSelect_('Kalender', 'calendar_id', h.calendar_id || '', calOpts);
+
+  openModal(id ? 'Edit Hari Libur' : 'Hari Libur Baru', html, function(){
+    const data = collectModal_();
+    if (!data.tanggal || !data.nama){ toast('Tanggal & Nama wajib', 'error'); return; }
+    if (id){
+      Object.assign(h, data);
+    } else {
+      data.id = 'hol_' + Math.random().toString(36).slice(2, 12);
+      DB.holidays.push(data);
+    }
+    closeModal();
+    markDirty();
+    renderHolidays();
+    toast(id ? '✅ Hari libur diupdate' : '✅ Hari libur dibuat');
+  });
+}
+
+/** Helper: ambil nilai dari form modal */
+function collectModal_(){
+  const body = document.getElementById('mBody');
+  const data = {};
+  body.querySelectorAll('input, select, textarea').forEach(el => {
+    if (!el.name) return;
+    let v = el.value;
+    if (el.type === 'number') v = num(v);
+    data[el.name] = v;
+  });
+  return data;
+}
+
+/* =====================================================================
+   BAGIAN 16 — DELETE HANDLERS
+   ===================================================================== */
+function deleteResource_(id){
+  if (!confirm('Hapus resource ini?')) return;
+  DB.master_resources = (DB.master_resources || []).filter(r => r.id !== id);
+  markDirty(); renderResources(); toast('🗑 Resource dihapus');
+}
+function deleteAhsp_(id){
+  if (!confirm('Hapus template AHSP ini?')) return;
+  DB.ahsp_headers = (DB.ahsp_headers || []).filter(a => a.id !== id);
+  markDirty(); renderAhsp(); toast('🗑 AHSP dihapus');
+}
+function deleteWbs_(id){
+  if (!confirm('Hapus item WBS ini?')) return;
+  DB.project_wbs = (DB.project_wbs || []).filter(w => w.id !== id);
+  markDirty(); renderWbs(); toast('🗑 WBS dihapus');
+}
+function deleteProject_(id){
+  if (!confirm('Hapus proyek ini? Semua WBS & progress terkait juga akan dihapus.')) return;
+  DB.projects = (DB.projects || []).filter(p => p.id !== id);
+  DB.project_wbs = (DB.project_wbs || []).filter(w => w.project_id !== id);
+  DB.progress = (DB.progress || []).filter(p => p.project_id !== id);
+  DB.project_ahsp_details = (DB.project_ahsp_details || []).filter(a => a.project_id !== id);
+  if (APP_STATE.activeProjectId === id) APP_STATE.activeProjectId = null;
+  markDirty(); renderProjects(); populateProjectSelect(); toast('🗑 Proyek dihapus');
+}
+function deleteProgress_(id){
+  if (!confirm('Hapus progress ini?')) return;
+  DB.progress = (DB.progress || []).filter(p => p.id !== id);
+  markDirty(); renderProgress(); toast('🗑 Progress dihapus');
+}
+function deleteCalendar_(id){
+  if (!confirm('Hapus kalender ini?')) return;
+  DB.working_calendars = (DB.working_calendars || []).filter(c => c.id !== id);
+  markDirty(); renderCalendars(); toast('🗑 Kalender dihapus');
+}
+function deleteHoliday_(id){
+  if (!confirm('Hapus hari libur ini?')) return;
+  DB.holidays = (DB.holidays || []).filter(h => h.id !== id);
+  markDirty(); renderHolidays(); toast('🗑 Hari libur dihapus');
+}
+
+/* =====================================================================
+   BAGIAN 17 — EVENT BINDING
+   ===================================================================== */
+function bindRenderEvents(){
+  // Resources
+  const btnAddRes = document.getElementById('btnAddRes');
+  if (btnAddRes) btnAddRes.addEventListener('click', () => openResourceModal(null));
+  const fResJenis = document.getElementById('fResJenis');
+  if (fResJenis) fResJenis.addEventListener('change', renderResources);
+  const fResSearch = document.getElementById('fResSearch');
+  if (fResSearch) fResSearch.addEventListener('input', renderResources);
+
+  // AHSP
+  const btnAddAhsp = document.getElementById('btnAddAhsp');
+  if (btnAddAhsp) btnAddAhsp.addEventListener('click', () => openAhspModal(null));
+
+  // WBS
+  const btnAddWbs = document.getElementById('btnAddWbs');
+  if (btnAddWbs) btnAddWbs.addEventListener('click', () => openWbsModal(null));
+  const btnRunCPMWBS = document.getElementById('btnRunCPMWBS');
+  if (btnRunCPMWBS) btnRunCPMWBS.addEventListener('click', () => {
+    if (typeof CPM !== 'undefined' && CPM.run && APP_STATE.activeProjectId){
+      const r = CPM.run(APP_STATE.activeProjectId);
+      toast(r.ok ? '✅ CPM selesai: ' + r.count + ' task, ' + r.critical + ' kritis' : '⚠ ' + r.message);
+      markDirty(); renderWbs();
+    } else {
+      toast('Modul CPM belum siap', 'warn');
+    }
+  });
+
+  // Schedule
+  const btnRunCPM = document.getElementById('btnRunCPM');
+  if (btnRunCPM) btnRunCPM.addEventListener('click', () => {
+    if (typeof CPM !== 'undefined' && CPM.run && APP_STATE.activeProjectId){
+      const r = CPM.run(APP_STATE.activeProjectId);
+      toast(r.ok ? '✅ CPM selesai: ' + r.count + ' task' : '⚠ ' + r.message);
+      markDirty(); renderSchedule();
+    }
+  });
+
+  // Progress
+  const btnAddProg = document.getElementById('btnAddProg');
+  if (btnAddProg) btnAddProg.addEventListener('click', () => openProgressModal(null));
+
+  // Progress Wizard
+  const btnProgWiz = document.getElementById('btnProgressWizard');
+  if (btnProgWiz) btnProgWiz.addEventListener('click', () => {
+    if (typeof ProgressWizard !== 'undefined') ProgressWizard.open();
+    else toast('Modul Progress Wizard belum siap', 'warn');
+  });
+
+  // Calendar
+  const btnAddCalendar = document.getElementById('btnAddCalendar');
+  if (btnAddCalendar) btnAddCalendar.addEventListener('click', () => openCalendarModal(null));
+
+  // Holiday
+  const btnAddHoliday = document.getElementById('btnAddHoliday');
+  if (btnAddHoliday) btnAddHoliday.addEventListener('click', () => openHolidayModal(null));
+
+  // Project
+  const btnAddProj = document.getElementById('btnAddProj');
+  if (btnAddProj) btnAddProj.addEventListener('click', () => openProjectModal(null));
+
+  // Settings — Save overhead/PPN
+  const btnSaveSet = document.getElementById('btnSaveSet');
+  if (btnSaveSet) btnSaveSet.addEventListener('click', () => {
+    SETTINGS.overhead_default = num((document.getElementById('setOh') || {}).value);
+    SETTINGS.ppn_default = num((document.getElementById('setPpn') || {}).value);
+    markDirty();
+    toast('✅ Pengaturan disimpan');
+  });
+
+  // Report PDF
+  const btnReport = document.getElementById('btnReport');
+
+    // Shortcuts help button
+  const btnShort = document.getElementById('btnShortcuts');
+  if (btnShort && !btnShort._ksBound){
+    btnShort._ksBound = true;
+    btnShort.addEventListener('click', function(){
+      if (typeof KeyboardShortcuts !== 'undefined') KeyboardShortcuts.showHelp();
+      else toast('Modul Shortcuts belum siap', 'warn');
+    });
+  }
+
+  if (btnReport && !btnReport._repBound){
+    btnReport._repBound = true;
+    btnReport.addEventListener('click', function(){
+      if (typeof Reporting !== 'undefined' && Reporting.open) Reporting.open();
+      else toast('Modul Reporting belum siap', 'warn');
+    });
+  }
+
+  console.log('[ScheduleJs_12] Render events bound.');
+}
+
+/* =====================================================================
+   BAGIAN 18 — BOOTSTRAP
+   ===================================================================== */
+if (document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', bindRenderEvents);
+} else {
+  setTimeout(bindRenderEvents, 100);
+}
+
+console.log('[ScheduleJs_12] RenderMain module loaded.');
+</script>
