@@ -1,0 +1,370 @@
+<script>
+/* =====================================================================
+   ScheduleJs_07_GanttView.html — GANTT INTERACTIVE VIEW
+   - Render toolbar + table (kiri) + canvas (kanan)
+   - Sync scroll, zoom, collapse, tooltip, klik
+   ===================================================================== */
+var GanttView = {
+
+  state: {
+    granularity: 'weekly',
+    zoom: 1.0,
+    collapsed: {},       // { taskId: true }
+    hoveredId: null,
+    selectedId: null,
+    leftCols: [
+      { key: 'expand', label: '',      w: 22,  align: 'center' },
+      { key: 'kode',   label: 'Kode',  w: 90,  align: 'left'   },
+      { key: 'nama',   label: 'Uraian',w: 260, align: 'left'   },
+      { key: 'durasi', label: 'Durasi',w: 56,  align: 'right'  },
+      { key: 'start',  label: 'Mulai', w: 90,  align: 'left'   },
+      { key: 'finish', label: 'Selesai',w: 90, align: 'left'   }
+    ]
+  },
+
+  /* ── Entry point ── */
+  render: function(){
+    const container = document.getElementById('ganttContainer');
+    if (!container) return;
+
+    const projectId = APP_STATE.activeProjectId;
+    if (!projectId){
+      container.innerHTML = '<div class="rs-wrap" style="padding:40px;text-align:center;color:#8fa3c4">Pilih proyek aktif terlebih dahulu</div>';
+      return;
+    }
+
+    const tasks = GanttEngine.getTasks(projectId);
+    if (!tasks.length){
+      container.innerHTML =
+        '<div class="gantt-root"><div class="gantt-toolbar"><div class="gantt-toolbar-left">' +
+        '<div class="gantt-title">📊 Gantt Chart</div>' +
+        '<div class="gantt-subtitle">Belum ada task WBS pada proyek ini</div></div></div>' +
+        '<div class="rs-wrap" style="padding:60px;text-align:center;color:#8fa3c4;font-style:italic">' +
+        'Tambahkan item di tab 🗂 WBS / BQ, lalu jalankan CPM untuk menghitung jadwal.</div></div>';
+      return;
+    }
+
+    // Build tree & flat list
+    const tree = this.buildTree(tasks);
+    const flat = this.flattenTree(tree);
+
+    // Compute timeline
+    const range = GanttEngine.computeRange(tasks);
+    const cols = GanttEngine.buildColumns(range, this.state.granularity);
+    const totalW = GanttEngine.totalWidth(cols) * this.state.zoom;
+
+    // Build HTML
+    container.innerHTML = this.buildHTML(flat, cols, totalW);
+
+    // Draw canvases
+    this.drawCanvases(flat, cols);
+
+    // Bind events
+    this.bindEvents(flat, cols);
+  },
+
+  /* ── Build hierarchy tree (parent-child) ── */
+  buildTree: function(tasks){
+    const byId = {};
+    const roots = [];
+    tasks.forEach(t => { byId[t.id] = Object.assign({}, t, { _children: [] }); });
+    tasks.forEach(t => {
+      const node = byId[t.id];
+      if (t.parent_id && byId[t.parent_id]){
+        byId[t.parent_id]._children.push(node);
+      } else {
+        roots.push(node);
+      }
+    });
+    return roots;
+  },
+
+  /* ── Flatten dengan depth (respect collapse) ── */
+  flattenTree: function(roots){
+    const out = [];
+    const self = this;
+    function walk(nodes, depth){
+      nodes.forEach(n => {
+        const hasChildren = n._children && n._children.length > 0;
+        out.push({
+          task: n,
+          depth: depth,
+          hasChildren: hasChildren,
+          hidden: false
+        });
+        if (hasChildren && !self.state.collapsed[n.id]){
+          walk(n._children, depth + 1);
+        }
+      });
+    }
+    walk(roots, 0);
+    return out;
+  },
+
+  /* ── Build full HTML ── */
+  buildHTML: function(flat, cols, totalW){
+    const self = this;
+    const tableW = this.state.leftCols.reduce((s, c) => s + c.w, 0);
+    const rowH = GanttEngine.ROW_HEIGHT;
+    const headH = GanttEngine.HEADER_HEIGHT;
+
+    // Toolbar
+    let html = '<div class="gantt-root" style="--gantt-table-w:' + tableW + 'px">';
+    html += '<div class="gantt-toolbar">';
+    html +=   '<div class="gantt-toolbar-left">';
+    html +=     '<div class="gantt-title">📊 Gantt Chart — ' + esc((getActiveProject() || {}).kode || '') + '</div>';
+    html +=     '<div class="gantt-subtitle">' + flat.length + ' task · Total ' + cols.length + ' kolom ' + this.state.granularity + '</div>';
+    html +=   '</div>';
+    html +=   '<div class="gantt-toolbar-right">';
+    html +=     '<span class="gantt-lbl">Granularitas</span>';
+    html +=     '<select id="gvGranularity" class="gantt-zoom">';
+    html +=       '<option value="daily"' + (this.state.granularity === 'daily' ? ' selected' : '') + '>Harian</option>';
+    html +=       '<option value="weekly"' + (this.state.granularity === 'weekly' ? ' selected' : '') + '>Mingguan</option>';
+    html +=       '<option value="monthly"' + (this.state.granularity === 'monthly' ? ' selected' : '') + '>Bulanan</option>';
+    html +=     '</select>';
+    html +=     '<span class="gantt-lbl">Zoom</span>';
+    html +=     '<input type="range" id="gvZoom" min="0.5" max="2.5" step="0.1" value="' + this.state.zoom + '" style="width:110px" />';
+    html +=     '<button class="gantt-btn-tool" id="gvExpandAll">⊞ Expand</button>';
+    html +=     '<button class="gantt-btn-tool" id="gvCollapseAll">⊟ Collapse</button>';
+    html +=     '<button class="gantt-btn-tool" id="gvFit">🎯 Fit</button>';
+    html +=   '</div>';
+    html += '</div>';
+
+    // Body grid
+    html += '<div class="gantt-body" style="--gantt-head-h:' + headH + 'px">';
+
+    // R1C1 — Table header
+    html += '<div class="gantt-thead" id="gvThead">';
+    this.state.leftCols.forEach(c => {
+      html += '<div class="gantt-th ' + (c.align || '') + '" style="width:' + c.w + 'px;flex:0 0 ' + c.w + 'px">' + esc(c.label) + '</div>';
+    });
+    html += '</div>';
+
+    // R1C2 — Axis header
+    html += '<div class="gantt-axis-wrap"><div class="gantt-axis-track" id="gvAxisTrack">';
+    html += '<canvas id="gvAxis" class="gantt-axis"></canvas>';
+    html += '</div></div>';
+
+    // R2C1 — Table body
+    html += '<div class="gantt-tbody" id="gvTbody">';
+    flat.forEach((row, i) => {
+      html += this.buildRowHTML(row, i);
+    });
+    html += '</div>';
+
+    // R2C2 — Bars canvas
+    html += '<div class="gantt-bars-wrap" id="gvBarsWrap"><canvas id="gvBars" class="gantt-bars"></canvas>';
+    html += '<div class="gt-tip" id="gvTooltip"></div>';
+    html += '</div>';
+
+    html += '</div></div>'; // close body, root
+    return html;
+  },
+
+  /* ── Build single table row ── */
+  buildRowHTML: function(row, idx){
+    const t = row.task;
+    const isCrit = num(t.is_critical) === 1;
+    const isGroup = num(t.is_group) === 1;
+    const expander = row.hasChildren
+      ? '<span class="gt-expand' + (this.state.collapsed[t.id] ? ' is-collapsed' : '') + '" data-expand="' + esc(t.id) + '">' + (this.state.collapsed[t.id] ? '▶' : '▼') + '</span>'
+      : '<span class="gt-expand is-leaf">·</span>';
+
+    const indent = row.depth * 14;
+    const classes = ['gantt-row'];
+    if (isGroup) classes.push('is-summary');
+    if (isCrit) classes.push('is-critical');
+
+    let html = '<div class="' + classes.join(' ') + '" data-row-idx="' + idx + '" data-id="' + esc(t.id) + '">';
+
+    // expand column
+    html += '<div class="gantt-td" style="width:22px;flex:0 0 22px;justify-content:center">' + expander + '</div>';
+    // kode
+    html += '<div class="gantt-td" style="width:90px;flex:0 0 90px">';
+    html +=   '<span class="gt-id-badge">' + esc(t.kode_wbs || '—') + '</span>';
+    html += '</div>';
+    // nama
+    html += '<div class="gantt-td" style="width:260px;flex:0 0 260px;padding-left:' + (12 + indent) + 'px">';
+    html +=   '<span class="gt-name">' + esc(t.uraian || '—') + '</span>';
+    html += '</div>';
+    // durasi
+    html += '<div class="gantt-td" style="width:56px;flex:0 0 56px;justify-content:flex-end">';
+    html +=   '<span class="gt-num">' + (num(t.durasi_hari) || '—') + '</span>';
+    html += '</div>';
+    // start
+    html += '<div class="gantt-td" style="width:90px;flex:0 0 90px">';
+    html +=   '<span class="gt-date">' + esc(this.fmtShort(t.tgl_mulai_rencana || t.start_date)) + '</span>';
+    html += '</div>';
+    // finish
+    html += '<div class="gantt-td" style="width:90px;flex:0 0 90px">';
+    html +=   '<span class="gt-date">' + esc(this.fmtShort(t.tgl_selesai_rencana || t.finish_date)) + '</span>';
+    html += '</div>';
+
+    html += '</div>';
+    return html;
+  },
+
+  fmtShort: function(iso){
+    if (!iso) return '—';
+    const d = new Date(iso + 'T00:00:00');
+    if (isNaN(d)) return iso;
+    return d.toLocaleDateString('id-ID', { day:'2-digit', month:'short' });
+  },
+
+  /* ── Draw both canvases ── */
+  drawCanvases: function(flat, cols){
+    const tasks = flat.map(r => r.task);
+
+    // Axis
+    const axisCanvas = document.getElementById('gvAxis');
+    if (axisCanvas){
+      // Update zoomed width
+      const zCols = cols.map(c => Object.assign({}, c, { width: c.width * this.state.zoom }));
+      GanttEngine.drawAxis(axisCanvas, zCols, this.state.granularity);
+    }
+
+    // Bars
+    const barsCanvas = document.getElementById('gvBars');
+    if (barsCanvas){
+      const zCols = cols.map(c => Object.assign({}, c, { width: c.width * this.state.zoom }));
+      GanttEngine.drawBars(barsCanvas, tasks, zCols, this.state.granularity);
+    }
+  },
+
+  /* ── Bind events ── */
+  bindEvents: function(flat, cols){
+    const self = this;
+
+    // Sync scroll: tbody vertical → bars vertical
+    const tbody = document.getElementById('gvTbody');
+    const barsWrap = document.getElementById('gvBarsWrap');
+    const axisWrap = document.querySelector('.gantt-axis-wrap');
+
+    if (tbody && barsWrap){
+      tbody.addEventListener('scroll', () => {
+        barsWrap.scrollTop = tbody.scrollTop;
+      });
+      barsWrap.addEventListener('scroll', () => {
+        tbody.scrollTop = barsWrap.scrollTop;
+        if (axisWrap) axisWrap.scrollLeft = barsWrap.scrollLeft;
+      });
+    }
+
+    // Expander click
+    document.querySelectorAll('.gt-expand[data-expand]').forEach(el => {
+      el.addEventListener('click', function(e){
+        e.stopPropagation();
+        const id = this.dataset.expand;
+        if (self.state.collapsed[id]) delete self.state.collapsed[id];
+        else self.state.collapsed[id] = true;
+        self.render();
+      });
+    });
+
+    // Expand all / Collapse all
+    const btnExp = document.getElementById('gvExpandAll');
+    if (btnExp) btnExp.addEventListener('click', () => { self.state.collapsed = {}; self.render(); });
+    const btnCol = document.getElementById('gvCollapseAll');
+    if (btnCol) btnCol.addEventListener('click', () => {
+      flat.forEach(r => { if (r.hasChildren) self.state.collapsed[r.task.id] = true; });
+      self.render();
+    });
+    const btnFit = document.getElementById('gvFit');
+    if (btnFit) btnFit.addEventListener('click', () => {
+      self.state.zoom = 1.0;
+      self.render();
+    });
+
+    // Granularity select
+    const selG = document.getElementById('gvGranularity');
+    if (selG) selG.addEventListener('change', function(){
+      self.state.granularity = this.value;
+      self.render();
+    });
+
+    // Zoom slider
+    const zoomEl = document.getElementById('gvZoom');
+    if (zoomEl) zoomEl.addEventListener('input', function(){
+      self.state.zoom = parseFloat(this.value) || 1.0;
+      // Redraw without full re-render
+      const curFlat = flat;
+      const range = GanttEngine.computeRange(curFlat.map(r => r.task));
+      const newCols = GanttEngine.buildColumns(range, self.state.granularity);
+      self.drawCanvases(curFlat, newCols);
+      // Update widths
+      const totalW = GanttEngine.totalWidth(newCols) * self.state.zoom;
+      const axisTrack = document.getElementById('gvAxisTrack');
+      if (axisTrack) axisTrack.style.width = totalW + 'px';
+    });
+
+    // Row hover / click
+    document.querySelectorAll('.gantt-row').forEach(row => {
+      row.addEventListener('mouseenter', function(){
+        const id = this.dataset.id;
+        self.state.hoveredId = id;
+      });
+      row.addEventListener('mouseleave', () => { self.state.hoveredId = null; });
+      row.addEventListener('click', function(){
+        document.querySelectorAll('.gantt-row').forEach(r => r.classList.remove('is-selected'));
+        this.classList.add('is-selected');
+        self.state.selectedId = this.dataset.id;
+      });
+    });
+
+    // Tooltip on bar hover
+    if (barsWrap){
+      barsWrap.addEventListener('mousemove', function(e){
+        const rect = barsWrap.getBoundingClientRect();
+        const x = e.clientX - rect.left + barsWrap.scrollLeft;
+        const y = e.clientY - rect.top + barsWrap.scrollTop;
+        const rowIdx = Math.floor(y / GanttEngine.ROW_HEIGHT);
+        if (rowIdx >= 0 && rowIdx < flat.length){
+          const t = flat[rowIdx].task;
+          self.showTooltip(e.clientX, e.clientY, t);
+        } else {
+          self.hideTooltip();
+        }
+      });
+      barsWrap.addEventListener('mouseleave', () => self.hideTooltip());
+    }
+  },
+
+  showTooltip: function(cx, cy, t){
+    const tip = document.getElementById('gvTooltip');
+    if (!tip) return;
+    const isCrit = num(t.is_critical) === 1;
+    const isGroup = num(t.is_group) === 1;
+
+    let html = '<div class="gt-tip-title">';
+    html += '<span class="gt-tip-kode">' + esc(t.kode_wbs || '') + '</span>';
+    html += '<span style="color:#e6edf7">' + esc(t.uraian || '') + '</span>';
+    if (isCrit) html += '<span class="gt-tip-badge crit">KRITIS</span>';
+    if (isGroup) html += '<span class="gt-tip-badge sum">SUMMARY</span>';
+    html += '</div>';
+    html += '<div class="gt-tip-row"><span class="k">Mulai</span><span class="v">' + esc(t.tgl_mulai_rencana || t.start_date || '—') + '</span></div>';
+    html += '<div class="gt-tip-row"><span class="k">Selesai</span><span class="v">' + esc(t.tgl_selesai_rencana || t.finish_date || '—') + '</span></div>';
+    html += '<div class="gt-tip-row"><span class="k">Durasi</span><span class="v">' + num(t.durasi_hari) + ' hari</span></div>';
+    html += '<div class="gt-tip-row"><span class="k">Float</span><span class="v">' + num(t.float_total || t.total_float) + ' hari</span></div>';
+    html += '<div class="gt-tip-row"><span class="k">Predecessor</span><span class="v">' + esc(t.predecessor || '—') + '</span></div>';
+
+    tip.innerHTML = html;
+    tip.style.left = (cx + 12) + 'px';
+    tip.style.top  = (cy + 12) + 'px';
+    tip.classList.add('show');
+  },
+
+  hideTooltip: function(){
+    const tip = document.getElementById('gvTooltip');
+    if (tip) tip.classList.remove('show');
+  }
+};
+
+window.GanttView = GanttView;
+
+/* ── Hook: dipanggil saat tab Schedule dibuka ── */
+function renderGantt(){
+  GanttView.render();
+}
+
+console.log('[GanttView] Module loaded.');
+</script>
