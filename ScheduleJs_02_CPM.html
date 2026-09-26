@@ -1,0 +1,398 @@
+<script>
+/* =====================================================================
+   BAGIAN 3 — CPM ENGINE v3 (Fase 1B)
+   Topological Sort + Forward/Backward Pass + Critical Path
+   ===================================================================== */
+var CPM = {
+
+  getDuration(it){
+    const a = num(it.duration);
+    if (a > 0) return Math.max(1, Math.round(a));
+    const b = num(it.durasi_hari);
+    if (b > 0) return Math.max(1, Math.round(b));
+    return 1;
+  },
+
+  getScheduleMode(it){
+    const m = String(it.schedule_mode || 'auto').trim().toLowerCase();
+    return (m === 'manual') ? 'manual' : 'auto';
+  },
+
+  _parseDate(v){
+    if (!v) return null;
+    if (v instanceof Date) return isNaN(v.getTime()) ? null : new Date(v);
+    const s = String(v).trim();
+    if (!s) return null;
+    const d = new Date(s.includes('T') ? s : s + 'T00:00:00');
+    return isNaN(d.getTime()) ? null : d;
+  },
+
+  parsePredecessorSegment(seg){
+    const s = String(seg).trim();
+    if (!s) return null;
+    const m = s.match(/^(.+?)\s*(FS|SS|FF|SF)\s*([+-]\s*\d+)?$/i);
+    if (m) return {
+      id:  m[1].trim(),
+      type:m[2].toUpperCase(),
+      lag: m[3] ? parseInt(m[3].replace(/\s/g,''), 10) : 0,
+      explicit: true
+    };
+    return { id: s, type:'FS', lag:0, explicit: false };
+  },
+
+  parsePredecessors(str){
+    if (!str) return [];
+    return String(str)
+      .split(/[;\n]+/)
+      .map(s => this.parsePredecessorSegment(s))
+      .filter(Boolean);
+  },
+
+  parsePred(str){
+    const list = this.parsePredecessors(str);
+    return list.length ? list[0] : null;
+  },
+
+  getRelationships(it){
+    const parsed = this.parsePredecessors(it.predecessor);
+    if (!parsed.length) return [];
+
+    const multi = parsed.length > 1;
+    const globalType = (it.pred_type && String(it.pred_type).trim())
+                       ? String(it.pred_type).trim().toUpperCase()
+                       : null;
+    const globalLag  = (it.lag_days !== undefined && it.lag_days !== null && it.lag_days !== '')
+                       ? num(it.lag_days)
+                       : null;
+
+    return parsed.map(p => {
+      if (multi || p.explicit){
+        return { predRef: p.id, type: p.type, lag: p.lag };
+      }
+      return {
+        predRef: p.id,
+        type: globalType || p.type,
+        lag:  globalLag !== null ? globalLag : p.lag
+      };
+    });
+  },
+
+  getRelationship(it){
+    const list = this.getRelationships(it);
+    return list.length ? list[0] : null;
+  },
+
+  buildMaps(items){
+    const byId = {}, byKode = {};
+    items.forEach(it => {
+      byId[it.id] = it;
+      if (it.kode_wbs) byKode[String(it.kode_wbs).trim()] = it;
+    });
+    return { byId, byKode };
+  },
+
+  resolveRef(ref, maps){
+    if (!ref) return null;
+    return maps.byId[ref] || maps.byKode[String(ref).trim()] || null;
+  },
+
+  getCalendarFor(it, proj){
+    return WorkingCalendar.get(it.calendar_id || proj.calendar_id);
+  },
+
+  snapToWorkDay(iso, cal){
+    let d = iso instanceof Date ? new Date(iso) : new Date(iso + 'T00:00:00');
+    let guard = 0;
+    while (!WorkingCalendar.isWorkDay(d, cal) && guard++ < 90){
+      d.setDate(d.getDate() + 1);
+    }
+    return d;
+  },
+
+  topologicalSort(items, maps){
+    const indeg = {}, succs = {};
+    items.forEach(it => { indeg[it.id] = 0; succs[it.id] = []; });
+
+    const seenEdges = {};
+    items.forEach(it => {
+      const rels = this.getRelationships(it);
+      rels.forEach(rel => {
+        const pred = this.resolveRef(rel.predRef, maps);
+        if (!pred) return;
+        const key = pred.id + '>' + it.id;
+        if (seenEdges[key]) return;
+        seenEdges[key] = true;
+        indeg[it.id]++;
+        succs[pred.id].push(it.id);
+      });
+    });
+
+    const queue = items.filter(it => indeg[it.id] === 0).map(it => it.id);
+    const order = [];
+    while (queue.length){
+      const id = queue.shift();
+      order.push(id);
+      succs[id].forEach(sid => {
+        indeg[sid]--;
+        if (indeg[sid] === 0) queue.push(sid);
+      });
+    }
+
+    if (order.length !== items.length){
+      const cycle = items.filter(it => order.indexOf(it.id) < 0)
+                         .map(it => it.kode_wbs || it.id);
+      return { ok:false, order, cycle };
+    }
+    return { ok:true, order };
+  },
+
+  forwardPass(items, order, proj, maps){
+    const byId = maps.byId;
+    const projStart = new Date(proj.tgl_mulai || new Date());
+
+    order.forEach(id => {
+      const it = byId[id];
+      const dur = this.getDuration(it);
+      const cal = this.getCalendarFor(it, proj);
+      const mode = this.getScheduleMode(it);
+
+      if (mode === 'manual'){
+        const ms = this._parseDate(it.manual_start);
+        if (ms){
+          let mf = this._parseDate(it.manual_finish);
+          if (!mf || mf <= ms){
+            mf = WorkingCalendar.addWorkDays(ms, dur, cal);
+          }
+          it._ES = ms;
+          it._EF = mf;
+          it._isManual = true;
+          return;
+        }
+      }
+
+      let es = new Date(projStart);
+
+      const ct = it.constraint_type;
+      const cd = this._parseDate(it.constraint_date);
+      if (ct && cd){
+        switch (ct){
+          case 'SNET':
+          case 'MSO':
+            if (cd > es) es = cd;
+            break;
+          case 'FNET': {
+            const cand = WorkingCalendar.addWorkDays(cd, -dur, cal);
+            if (cand > es) es = cand;
+            break;
+          }
+        }
+      }
+
+      const rels = this.getRelationships(it);
+      rels.forEach(rel => {
+        const pred = this.resolveRef(rel.predRef, maps);
+        if (!pred || !pred._ES || !pred._EF) return;
+        const lag = rel.lag;
+        let cand;
+        switch (rel.type){
+          case 'FS': cand = WorkingCalendar.addWorkDays(pred._EF,  lag, cal); break;
+          case 'SS': cand = WorkingCalendar.addWorkDays(pred._ES,  lag, cal); break;
+          case 'FF': cand = WorkingCalendar.addWorkDays(pred._EF, -dur + lag, cal); break;
+          case 'SF': cand = WorkingCalendar.addWorkDays(pred._ES, -dur + lag, cal); break;
+          default:   cand = pred._EF;
+        }
+        if (cand > es) es = cand;
+      });
+
+      es = this.snapToWorkDay(es, cal);
+
+      it._ES = es;
+      it._EF = WorkingCalendar.addWorkDays(es, dur, cal);
+      it._isManual = false;
+    });
+  },
+
+  backwardPass(items, order, projFinish, proj, maps){
+    const byId = maps.byId;
+    const succs = {};
+    items.forEach(it => { succs[it.id] = []; });
+
+    const seenEdges = {};
+    items.forEach(it => {
+      const rels = this.getRelationships(it);
+      rels.forEach(rel => {
+        const pred = this.resolveRef(rel.predRef, maps);
+        if (!pred) return;
+        const key = pred.id + '>' + it.id;
+        if (seenEdges[key]) return;
+        seenEdges[key] = true;
+        succs[pred.id].push({ succ: it, rel });
+      });
+    });
+
+    for (let i = order.length - 1; i >= 0; i--){
+      const it = byId[order[i]];
+      const dur = this.getDuration(it);
+      const cal = this.getCalendarFor(it, proj);
+      const list = succs[it.id];
+
+      let lf;
+      if (!list.length){
+        lf = new Date(projFinish);
+      } else {
+        lf = null;
+        list.forEach(({ succ, rel }) => {
+          const lag = rel.lag;
+          const type = rel.type;
+          let cand;
+          switch (type){
+            case 'FS': cand = WorkingCalendar.addWorkDays(succ._LS, -lag, cal); break;
+            case 'SS': cand = WorkingCalendar.addWorkDays(succ._LS, -lag, cal); break;
+            case 'FF': cand = WorkingCalendar.addWorkDays(succ._LF, -lag, cal); break;
+            case 'SF': cand = WorkingCalendar.addWorkDays(succ._LF, -lag, cal); break;
+            default:   cand = succ._LS;
+          }
+          if (lf === null || cand < lf) lf = cand;
+        });
+      }
+
+      const ct = it.constraint_type;
+      const cd = this._parseDate(it.constraint_date);
+      if (ct && cd){
+        switch (ct){
+          case 'FNLT':
+            if (cd < lf) lf = cd;
+            break;
+          case 'MFO':
+            lf = cd;
+            break;
+          case 'SNLT': {
+            const cand = WorkingCalendar.addWorkDays(cd, dur, cal);
+            if (cand < lf) lf = cand;
+            break;
+          }
+          case 'MSO': {
+            const cand = WorkingCalendar.addWorkDays(cd, dur, cal);
+            if (cand < lf) lf = cand;
+            break;
+          }
+        }
+      }
+
+      it._LF = lf;
+      it._LS = WorkingCalendar.addWorkDays(lf, -dur, cal);
+    }
+  },
+
+  computeFloat(items, proj){
+    items.forEach(it => {
+      const cal = this.getCalendarFor(it, proj);
+      const flt = WorkingCalendar.diffDays(
+        WorkingCalendar.fmt(it._ES),
+        WorkingCalendar.fmt(it._LS),
+        cal, 'working'
+      );
+      it._totalFloat = Math.max(0, flt);
+    });
+  },
+
+  run(projectId){
+    const proj = DB.projects.find(p => p.id === projectId);
+    if (!proj) return { ok:false, message:'Proyek tidak ditemukan' };
+
+    const items = DB.project_wbs.filter(w =>
+      w.project_id === projectId && !w.is_group
+    );
+    if (!items.length) return { ok:true, message:'Tidak ada item WBS', count:0 };
+
+    const maps = this.buildMaps(items);
+    const ts = this.topologicalSort(items, maps);
+    if (!ts.ok){
+      return {
+        ok:false,
+        message:'⚠ Circular dependency: ' + ts.cycle.join(' → ')
+      };
+    }
+
+    this.forwardPass(items, ts.order, proj, maps);
+
+    const projStart = new Date(proj.tgl_mulai || new Date());
+    let projFinish = projStart;
+    items.forEach(it => {
+      if (it._EF && it._EF > projFinish) projFinish = it._EF;
+    });
+
+    this.backwardPass(items, ts.order, projFinish, proj, maps);
+
+    items.forEach(it => {
+      if (it._isManual) return;
+      const ct = String(it.constraint_type || '').toUpperCase();
+      if (ct === 'ALAP'){
+        it._ES = new Date(it._LS);
+        it._EF = new Date(it._LF);
+      }
+    });
+
+    this.computeFloat(items, proj);
+
+    items.forEach(it => {
+      const startISO  = WorkingCalendar.fmt(it._ES);
+      const finishISO = WorkingCalendar.fmt(it._EF);
+      const lsISO     = WorkingCalendar.fmt(it._LS);
+      const lfISO     = WorkingCalendar.fmt(it._LF);
+      const dur       = this.getDuration(it);
+      const flt       = it._totalFloat || 0;
+      const crit      = flt <= 0 ? 1 : 0;
+
+      writeScheduleField(it, 'durasi_hari',         dur);
+      writeScheduleField(it, 'tgl_mulai_rencana',   startISO);
+      writeScheduleField(it, 'tgl_selesai_rencana', finishISO);
+      writeScheduleField(it, 'float_total',         flt);
+      writeScheduleField(it, 'is_critical',         crit);
+
+      writeScheduleField(it, 'start_date',   startISO);
+      writeScheduleField(it, 'finish_date',  finishISO);
+      writeScheduleField(it, 'early_start',  startISO);
+      writeScheduleField(it, 'early_finish', finishISO);
+      writeScheduleField(it, 'late_start',   lsISO);
+      writeScheduleField(it, 'late_finish',  lfISO);
+      writeScheduleField(it, 'total_float',  flt);
+
+      delete it._ES; delete it._EF; delete it._LS; delete it._LF;
+      delete it._totalFloat; delete it._isManual;
+    });
+
+    const newFinishISO = WorkingCalendar.fmt(projFinish);
+    if (newFinishISO && newFinishISO !== proj.tgl_selesai){
+      proj.tgl_selesai = newFinishISO;
+      const dur = hitungDurasiLengkap(
+        proj.tgl_mulai, newFinishISO,
+        WorkingCalendar.get(proj.calendar_id),
+        proj.durasi_mode || 'working'
+      );
+      proj.durasi_hari   = dur.durasi_hari;
+      proj.durasi_minggu = dur.durasi_minggu;
+      proj.durasi_kerja  = dur.durasi_kerja;
+    }
+
+    const criticalCount = items.filter(it => num(it.is_critical) === 1).length;
+    const manualCount   = items.filter(it => this.getScheduleMode(it) === 'manual').length;
+
+    return {
+      ok: true,
+      message: 'CPM selesai',
+      count: items.length,
+      critical: criticalCount,
+      manual: manualCount,
+      finish: newFinishISO,
+      start: WorkingCalendar.fmt(projStart)
+    };
+  }
+};
+
+/* ── Backward-compat ── */
+function runCPM(projectId){
+  return CPM.run(projectId);
+}
+window.CPM = CPM;
+</script>
