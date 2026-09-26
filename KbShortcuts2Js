@@ -1,0 +1,30 @@
+<script>
+KeyboardShortcuts.doPush = function() {
+  if (typeof MultiUser !== 'undefined' && !MultiUser.canEdit()) { toast('Read-Only', 'warn'); return; }
+  if (typeof pushToSheet === 'function') { toast('Push...', 'warn'); pushToSheet(); }
+};
+KeyboardShortcuts.doSearch = function() {
+  var el = document.getElementById('fResSearch') || document.getElementById('pwSearch');
+  if (el && el.offsetParent) { el.focus(); el.select(); }
+  else toast('Tidak ada kolom cari', 'warn');
+};
+KeyboardShortcuts.gotoTab = function(n) {
+  var o = ['executive','dashboard','resources','ahsp','wbs','schedule','calendar','holidays','analysis','progress','recon','lembar','projects','settings'];
+  var id = o[n-1];
+  if (!id) return;
+  var t = document.querySelector('.tab[data-tab="' + id + '"]');
+  if (t && t.style.display !== 'none' && typeof switchTab === 'function') switchTab(id);
+};
+KeyboardShortcuts.showHelp = function() {
+  var d = [['Ctrl+S','Push ke Sheet'],['Ctrl+P','Print halaman'],['Ctrl+F','Fokus pencarian'],['Alt+K','Bantuan ini'],['Esc','Tutup modal'],['Ctrl+1..9','Pindah tab cepat']];
+  var h = '<div class="ks-hint">Gunakan Ctrl (Win) atau Cmd (Mac).</div>';
+  h += '<div class="ks-wrap"><table class="ks-table"><thead><tr><th>Tombol</th><th>Aksi</th></tr></thead><tbody>';
+  for (var i = 0; i < d.length; i++) h += '<tr><td class="ks-key"><kbd>' + d[i][0] + '</kbd></td><td>' + d[i][1] + '</td></tr>';
+  h += '</tbody></table></div>';
+  openModal('Keyboard Shortcuts', h, null);
+  var f = document.querySelector('.modal-foot');
+  if (f) f.style.display = 'none';
+};
+setTimeout(function(){ KeyboardShortcuts.init(); }, 800);
+console.log('[Kb2] Module loaded.');
+</script>
