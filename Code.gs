@@ -2101,7 +2101,7 @@ function doGet(e) {
     'ScheduleJs_09_UndoBulk', 'ScheduleJs_10_SyncManager', 'ScheduleJs_11_Reporting',
     'ScheduleJs_12_RenderMain',
     'TrackingJs', 'ProgressWizardJs', 'PortfolioTimelineJs',
-    'KeyboardShortcutsJs', 'KbShortcuts2Js', 'Fase1COverride', 'MultiUserJs'
+    'KeyboardShortcutsJs', 'KbShortcuts2Js', 'AutosaveCoreJs', 'AutosaveUiJs', 'Fase1COverride', 'MultiUserJs'
   ];
 
   var allJs = '';
