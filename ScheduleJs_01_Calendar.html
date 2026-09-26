@@ -1,0 +1,149 @@
+<script>
+/* =====================================================================
+   BAGIAN 1 — WORKING CALENDAR ENGINE
+   Menghitung durasi dengan mempertimbangkan hari kerja & hari libur
+   ===================================================================== */
+
+/* Helper: format Date ke ISO date pakai waktu LOKAL (bukan UTC) */
+function localISO(d){
+  if (!(d instanceof Date) || isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+var WorkingCalendar = {
+  DEFAULT_WORK_DAYS: [1,2,3,4,5],
+
+  get(calendarId){
+    if (calendarId){
+      const c = (DB.working_calendars || []).find(x => x.id === calendarId);
+      if (c) return c;
+    }
+    return (DB.working_calendars || []).find(x => num(x.is_default) === 1)
+        || { work_days: '1,2,3,4,5', jam_per_hari: 8 };
+  },
+
+  isWorkDay(date, cal){
+    const workDays = String(cal.work_days || '1,2,3,4,5')
+                        .split(',').map(s => parseInt(s.trim(), 10));
+    const dow = date.getDay();
+    if (!workDays.includes(dow)) return false;
+
+    const dateStr = localISO(date);
+    const holidays = DB.holidays || [];
+    if (holidays.some(h => h.tanggal === dateStr)) return false;
+    return true;
+  },
+
+  diffDays(startDate, endDate, cal, mode){
+    if (!startDate || !endDate) return 0;
+    const d1 = new Date(startDate);
+    const d2 = new Date(endDate);
+    if (isNaN(d1) || isNaN(d2)) return 0;
+    if (d2 < d1) return 0;
+
+    if (mode === 'calendar'){
+      return Math.round((d2 - d1) / 86400000);
+    }
+
+    let count = 0;
+    const d = new Date(d1);
+    while (d < d2){
+      if (this.isWorkDay(d, cal)) count++;
+      d.setDate(d.getDate() + 1);
+    }
+    return count;
+  },
+
+  addWorkDays(startDate, days, cal){
+    let d = new Date(startDate);
+    let added = 0;
+    const dir = days >= 0 ? 1 : -1;
+    const remaining = Math.abs(days);
+    while (added < remaining){
+      d.setDate(d.getDate() + dir);
+      if (this.isWorkDay(d, cal)) added++;
+    }
+    return d;
+  },
+
+  fmt(d){
+    return localISO(d);
+  }
+};
+
+/* Helper: hitung lengkap durasi proyek */
+function hitungDurasiLengkap(tglMulai, tglSelesai, cal, mode){
+  const durasi_hari  = WorkingCalendar.diffDays(tglMulai, tglSelesai, cal, 'calendar');
+  const durasi_kerja = WorkingCalendar.diffDays(tglMulai, tglSelesai, cal, 'working');
+
+  let durasi_minggu;
+  if (mode === 'working'){
+    const workDaysCount = String(cal.work_days || '1,2,3,4,5').split(',').length;
+    durasi_minggu = Math.ceil(durasi_kerja / workDaysCount);
+  } else {
+    durasi_minggu = Math.ceil(durasi_hari / 7);
+  }
+
+  return { durasi_hari, durasi_minggu, durasi_kerja };
+}
+
+/* =====================================================================
+   BAGIAN 2 — SCHEDULE WHITELIST (Anti-Interference dengan RAB/RAP)
+   ===================================================================== */
+var SCHEDULE_WRITABLE_FIELDS = Object.freeze([
+  'predecessor','pred_type','lag_days','duration','calendar_id',
+  'start_date','finish_date',
+  'early_start','early_finish','late_start','late_finish',
+  'total_float','is_critical',
+  'constraint_type','constraint_date',
+  'durasi_hari',
+  'tgl_mulai_rencana','tgl_selesai_rencana',
+  'tgl_mulai_aktual','tgl_selesai_aktual',
+  'float_total',
+  'bl1_start','bl1_finish','bl1_set_at',
+  'bl2_start','bl2_finish','bl2_set_at',
+  'bl3_start','bl3_finish','bl3_set_at',
+  'schedule_mode','manual_start','manual_finish',
+  'work_contour'
+]);
+
+function writeScheduleField(wbsItem, field, value){
+  if (!SCHEDULE_WRITABLE_FIELDS.includes(field)){
+    console.error('[SECURITY] Attempt to write forbidden field:', field);
+    return false;
+  }
+  wbsItem[field] = value;
+  return true;
+}
+
+var CONSTRAINT_TYPES = {
+  ASAP: 'As Soon As Possible',
+  ALAP: 'As Late As Possible',
+  SNET: 'Start No Earlier Than',
+  SNLT: 'Start No Later Than',
+  FNET: 'Finish No Earlier Than',
+  FNLT: 'Finish No Later Than',
+  MSO:  'Must Start On',
+  MFO:  'Must Finish On'
+};
+window.CONSTRAINT_TYPES = CONSTRAINT_TYPES;
+
+var WORK_CONTOURS = Object.freeze({
+  uniform:     'Uniform (Merata)',
+  front:       'Front Loaded (Berat di Awal)',
+  back:        'Back Loaded (Berat di Akhir)',
+  bell:        'Bell (Lonceng)',
+  early_peak:  'Early Peak (Puncak Awal)',
+  late_peak:   'Late Peak (Puncak Akhir)',
+  double_peak: 'Double Peak (Dua Puncak)',
+  triangular:  'Triangular (Segitiga)'
+});
+window.WORK_CONTOURS = WORK_CONTOURS;
+window.WorkingCalendar = WorkingCalendar;
+window.hitungDurasiLengkap = hitungDurasiLengkap;
+window.localISO = localISO;
+window.writeScheduleField = writeScheduleField;
+</script>
