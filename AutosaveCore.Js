@@ -1,40 +1,45 @@
 <script>
 var Autosave = {
   KEY: 'mk_draft_v1',
-  INTERVAL: 30000,
+  DEBOUNCE: 5000,
   _timer: null,
-  _lastHash: '',
+  _inited: false,
+
   init: function() {
     if (this._inited) return;
     this._inited = true;
-    this.tick();
+
+    // Hook markDirty → auto-save 5s setelah perubahan terakhir
     var s = this;
-    this._timer = setInterval(function(){ s.tick(); }, this.INTERVAL);
+    var origDirty = window.markDirty;
+    if (typeof origDirty === 'function' && !origDirty._asWrapped) {
+      window.markDirty = function() {
+        origDirty.apply(this, arguments);
+        s.scheduleSave();
+      };
+      window.markDirty._asWrapped = true;
+    }
+
     window.addEventListener('beforeunload', function(){ s.saveNow(); });
     document.addEventListener('visibilitychange', function(){
       if (document.hidden) s.saveNow();
     });
-    console.log('[Autosave] Started (30s interval).');
+
+    console.log('[Autosave] ✅ Init OK. Debounce 5s, hooks installed.');
   },
-  hash: function() {
-    try {
-      var m = (DB.project_wbs || []).length + '|' +
-              (DB.progress || []).length + '|' +
-              (DB.master_resources || []).length + '|' +
-              (DB.projects || []).length + '|' +
-              (APP_STATE.isDirty ? '1' : '0');
-      return m;
-    } catch(e) { return ''; }
+
+  scheduleSave: function() {
+    clearTimeout(this._timer);
+    var s = this;
+    this._timer = setTimeout(function(){ s.saveNow(); }, this.DEBOUNCE);
+    console.log('[Autosave] ⏳ Save scheduled in 5s...');
   },
-  tick: function() {
-    var h = this.hash();
-    if (h && h !== this._lastHash) {
-      this._lastHash = h;
-      if (APP_STATE.isDirty) this.saveNow();
-    }
-  },
+
   saveNow: function() {
-    if (!APP_STATE.isDirty) return false;
+    if (!APP_STATE || !APP_STATE.isDirty) {
+      console.log('[Autosave] Skip (not dirty)');
+      return false;
+    }
     try {
       var draft = {
         ts: new Date().toISOString(),
@@ -44,7 +49,8 @@ var Autosave = {
         activeProjectId: APP_STATE.activeProjectId
       };
       localStorage.setItem(this.KEY, JSON.stringify(draft));
-      this.updateUI(draft.ts);
+      if (typeof this.updateUI === 'function') this.updateUI(draft.ts);
+      console.log('[Autosave] 💾 Saved at', draft.ts);
       return true;
     } catch(e) {
       console.warn('[Autosave] Save failed:', e.message);
