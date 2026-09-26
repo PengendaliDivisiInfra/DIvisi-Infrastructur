@@ -7,6 +7,7 @@ Autosave.updateUI = function(ts) {
     el = document.createElement('span');
     el.id = 'autosaveStatus';
     el.title = 'Draft tersimpan otomatis';
+    el.style.cssText = 'font-size:11px;color:#8fa3c4;padding:4px 10px;border-radius:6px;background:rgba(47,129,247,.08);border:1px solid #24365c;white-space:nowrap;font-weight:600;transition:.15s';
     tb.insertBefore(el, tb.firstChild);
   }
   var d = new Date(ts);
@@ -15,6 +16,12 @@ Autosave.updateUI = function(ts) {
   el.style.opacity = '1';
   clearTimeout(el._fade);
   el._fade = setTimeout(function(){ el.style.opacity = '0.5'; }, 3000);
+};
+
+Autosave.clearDraft = function() {
+  localStorage.removeItem(this.KEY);
+  var el = document.getElementById('autosaveStatus');
+  if (el) el.remove();
 };
 
 Autosave.checkDraft = function() {
@@ -31,9 +38,7 @@ Autosave.checkDraft = function() {
 
 Autosave.promptRestore = function(draft) {
   if (!confirm('Ada draft tersimpan dari ' + new Date(draft.ts).toLocaleString('id-ID') +
-               '.\n\nPulihkan draft ini?\n\n(Data di Sheet tidak berubah)')) {
-    return;
-  }
+               '.\n\nPulihkan draft ini?\n\n(Data di Sheet tidak berubah)')) return;
   try {
     DB = draft.db;
     SETTINGS = Object.assign(SETTINGS, draft.settings || {});
@@ -43,25 +48,17 @@ Autosave.promptRestore = function(draft) {
     if (typeof populateProjectSelect === 'function') populateProjectSelect();
     toast('✅ Draft dipulihkan. Klik Push untuk simpan permanen.');
     console.log('[Autosave] Draft restored from', draft.ts);
-  } catch(e) {
-    console.error('[Autosave] Restore failed:', e);
-  }
+  } catch(e) { console.error('[Autosave] Restore failed:', e); }
 };
 
-Autosave.clearDraft = function() {
-  localStorage.removeItem(this.KEY);
-  var el = document.getElementById('autosaveStatus');
-  if (el) el.remove();
-};
-
-/* Clear draft otomatis setelah push sukses */
+// Wrap pushToSheet → clear draft setelah sukses
 setTimeout(function() {
-  var origPush = window.pushToSheet;
-  if (typeof origPush === 'function' && !origPush._asWrapped) {
+  var orig = window.pushToSheet;
+  if (typeof orig === 'function' && !orig._asWrapped) {
     window.pushToSheet = function() {
-      var p = origPush.apply(this, arguments);
+      var p = orig.apply(this, arguments);
       if (p && typeof p.then === 'function') {
-        return p.then(function(r) {
+        return p.then(function(r){
           if (APP_STATE.isDirty === false) Autosave.clearDraft();
           return r;
         });
@@ -69,10 +66,14 @@ setTimeout(function() {
       return p;
     };
     window.pushToSheet._asWrapped = true;
-    console.log('[Autosave] pushToSheet wrapped');
   }
 }, 500);
 
-setTimeout(function(){ Autosave.checkDraft(); }, 3000);
+// BOOTSTRAP
+setTimeout(function(){
+  Autosave.init();
+  setTimeout(function(){ Autosave.checkDraft(); }, 3000);
+}, 1000);
+
 console.log('[AutosaveUi] Module loaded.');
 </script>
