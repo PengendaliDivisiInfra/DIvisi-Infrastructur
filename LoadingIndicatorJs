@@ -1,0 +1,67 @@
+<script>
+/* =====================================================================
+   LOADING INDICATOR
+   Overlay dengan spinner untuk menandai proses loading
+   ===================================================================== */
+(function(){
+  if (window._loadingIndicatorInstalled) return;
+  window._loadingIndicatorInstalled = true;
+
+  const LoadingIndicator = {
+    _overlay: null,
+    _counter: 0,
+
+    _ensureOverlay(){
+      if (this._overlay) return;
+      const ov = document.createElement('div');
+      ov.id = 'loadingOverlay';
+      ov.style.cssText =
+        'position:fixed;top:0;left:0;width:100vw;height:100vh;' +
+        'background:rgba(11,18,32,.75);backdrop-filter:blur(4px);' +
+        'display:none;align-items:center;justify-content:center;' +
+        'z-index:99999;transition:opacity .2s;';
+      ov.innerHTML =
+        '<div style="text-align:center">' +
+          '<div style="width:56px;height:56px;margin:0 auto 16px;' +
+            'border:4px solid rgba(47,129,247,.2);border-top-color:#2f81f7;' +
+            'border-radius:50%;animation:mk-spin 1s linear infinite"></div>' +
+          '<div id="loadingText" style="color:#e6edf7;font-size:13px;' +
+            'font-family:Segoe UI;font-weight:600">Memuat…</div>' +
+        '</div>';
+      document.body.appendChild(ov);
+
+      if (!document.getElementById('mk-spin-style')){
+        const st = document.createElement('style');
+        st.id = 'mk-spin-style';
+        st.textContent = '@keyframes mk-spin{to{transform:rotate(360deg)}}';
+        document.head.appendChild(st);
+      }
+      this._overlay = ov;
+    },
+
+    show(text){
+      this._counter++;
+      this._ensureOverlay();
+      const t = document.getElementById('loadingText');
+      if (t) t.textContent = text || 'Memuat…';
+      this._overlay.style.display = 'flex';
+    },
+
+    hide(){
+      this._counter = Math.max(0, this._counter - 1);
+      if (this._counter === 0 && this._overlay){
+        this._overlay.style.display = 'none';
+      }
+    },
+
+    forceHide(){
+      this._counter = 0;
+      if (this._overlay) this._overlay.style.display = 'none';
+    }
+  };
+
+  window.LoadingIndicator = LoadingIndicator;
+  console.log('%c[LoadingIndicator.js] ✅ Loading overlay installed',
+    'color:#22c55e;font-weight:bold');
+})();
+</script>
