@@ -1,0 +1,535 @@
+<script>
+/* =====================================================================
+   ScheduleJs_04_Resource.html — RESOURCE LOADING & HISTOGRAM
+   - Time-Phased Resource Loading (qty × periode)
+   - Histogram kebutuhan per resource
+   - Deteksi Over-Allocation (qty > kapasitas_harian)
+   - Tabel Kebutuhan per Resource (total, peak, biaya)
+   ===================================================================== */
+var ResourceLoading = {
+  _chartLoad: null,
+  _chartHist: null,
+  state: {
+    mode: 'rab',
+    granularity: 'weekly',
+    histResource: ''
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     BAGIAN 1 — HELPER
+     ═══════════════════════════════════════════════════════════ */
+
+  getResById: function(id){
+    return (DB.master_resources || []).find(r => String(r.id) === String(id));
+  },
+
+  getAhspDetailsForTask: function(task){
+    if (!task.ahsp_id) return [];
+    return (DB.project_ahsp_details || []).filter(d =>
+      String(d.project_id) === String(task.project_id) &&
+      String(d.ahsp_id) === String(task.ahsp_id)
+    );
+  },
+
+  getCalendar: function(){
+    const p = getActiveProject() || {};
+    return WorkingCalendar.get(p.calendar_id);
+  },
+
+  isWorkDay: function(date){
+    return WorkingCalendar.isWorkDay(date, this.getCalendar());
+  },
+
+  getPeriodKey: function(date, granularity){
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    if (granularity === 'monthly') return y + '-' + m;
+    if (granularity === 'weekly'){
+      const wn = (typeof GanttEngine !== 'undefined' && GanttEngine.isoWeek)
+        ? GanttEngine.isoWeek(date) : 0;
+      return y + '-W' + String(wn).padStart(2, '0');
+    }
+    return y + '-' + m + '-' + d;
+  },
+
+  getPeriodLabel: function(key, granularity){
+    if (granularity === 'monthly'){
+      const parts = key.split('-');
+      const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, 1);
+      return d.toLocaleDateString('id-ID', { month: 'short', year: '2-digit' });
+    }
+    if (granularity === 'weekly'){
+      return key.split('-')[1] || key;
+    }
+    return key.slice(5);
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     BAGIAN 2 — KOMPUTASI
+     ═══════════════════════════════════════════════════════════ */
+
+  computeTaskDays: function(task){
+    const sISO = task.tgl_mulai_rencana || task.start_date;
+    const fISO = task.tgl_selesai_rencana || task.finish_date;
+    if (!sISO || !fISO) return [];
+
+    const cal = this.getCalendar();
+    const dur = num(task.durasi_hari) || WorkingCalendar.diffDays(sISO, fISO, cal, 'working') || 1;
+    const vol = this.state.mode === 'rap' ? num(task.volume_rap) : num(task.volume_rab);
+    if (vol <= 0) return [];
+
+    const details = this.getAhspDetailsForTask(task);
+    if (!details.length) return [];
+
+    // Kumpulkan work days dalam durasi task
+    const days = [];
+    const dStart = new Date(sISO + 'T00:00:00');
+    const dEnd   = new Date(fISO + 'T00:00:00');
+    const cur = new Date(dStart);
+    let guard = 0;
+    while (cur < dEnd && guard++ < 3000){
+      if (this.isWorkDay(cur)) days.push(new Date(cur));
+      cur.setDate(cur.getDate() + 1);
+    }
+    if (!days.length) days.push(new Date(dStart));
+
+    const totalDays = days.length;
+    const dailyVol = vol / totalDays;
+
+    // Hitung kebutuhan resource per hari
+    const out = [];
+    days.forEach(d => {
+      const pk = this.getPeriodKey(d, this.state.granularity);
+      details.forEach(det => {
+        const coef  = this.state.mode === 'rap' ? num(det.koefisien_rap) : num(det.koefisien_master);
+        const harga = this.state.mode === 'rap' ? num(det.harga_rap)       : num(det.harga_rab);
+        const qty = dailyVol * coef;
+        if (qty > 0){
+          out.push({
+            dateKey: pk,
+            resource_id: det.resource_id,
+            qty: qty,
+            biaya: qty * harga
+          });
+        }
+      });
+    });
+    return out;
+  },
+
+  aggregate: function(){
+    const projectId = APP_STATE.activeProjectId;
+    const empty = { byPeriod: {}, byResource: {}, dates: [] };
+    if (!projectId) return empty;
+
+    const tasks = (DB.project_wbs || []).filter(w =>
+      String(w.project_id) === String(projectId) && !num(w.is_group)
+    );
+    if (!tasks.length) return empty;
+
+    const byPeriod   = {};
+    const byResource = {};
+    const allPeriods = new Set();
+
+    tasks.forEach(t => {
+      const items = this.computeTaskDays(t);
+      items.forEach(d => {
+        allPeriods.add(d.dateKey);
+
+        if (!byPeriod[d.dateKey]) byPeriod[d.dateKey] = {};
+        byPeriod[d.dateKey][d.resource_id] = (byPeriod[d.dateKey][d.resource_id] || 0) + d.qty;
+
+        if (!byResource[d.resource_id]){
+          byResource[d.resource_id] = { total: 0, peak: 0, biaya: 0, periods: {}, peakKey: '' };
+        }
+        const br = byResource[d.resource_id];
+        br.total += d.qty;
+        br.biaya += d.biaya;
+        br.periods[d.dateKey] = (br.periods[d.dateKey] || 0) + d.qty;
+        if (br.periods[d.dateKey] > br.peak){
+          br.peak = br.periods[d.dateKey];
+          br.peakKey = d.dateKey;
+        }
+      });
+    });
+
+    return {
+      byPeriod,
+      byResource,
+      dates: Array.from(allPeriods).sort()
+    };
+  },
+
+  detectOverAlloc: function(agg){
+    const out = [];
+    Object.keys(agg.byResource).forEach(resId => {
+      const res = this.getResById(resId);
+      if (!res) return;
+      const cap = num(res.kapasitas_harian);
+      if (cap <= 0) return;
+
+      const data = agg.byResource[resId];
+      Object.keys(data.periods).forEach(pk => {
+        const qty = data.periods[pk];
+        let avgDaily;
+        if (this.state.granularity === 'daily')       avgDaily = qty;
+        else if (this.state.granularity === 'weekly') avgDaily = qty / 5;
+        else                                          avgDaily = qty / 22;
+
+        if (avgDaily > cap){
+          out.push({
+            resource_id: resId,
+            resource_kode: res.kode || '',
+            resource_nama: res.nama || '',
+            resource_satuan: res.satuan || '',
+            kapasitas: cap,
+            avgDaily: avgDaily,
+            qty: qty,
+            periodKey: pk,
+            over: avgDaily - cap,
+            ratio: avgDaily / cap
+          });
+        }
+      });
+    });
+    out.sort((a, b) => b.ratio - a.ratio);
+    return out;
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     BAGIAN 3 — RENDER
+     ═══════════════════════════════════════════════════════════ */
+
+  renderAll: function(){
+    const wrapIds = ['tblResourceLoad', 'tblResourceByRes', 'overAllocWrap'];
+
+    if (!APP_STATE.activeProjectId){
+      wrapIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '<div style="padding:20px;text-align:center;color:#8fa3c4">Pilih proyek aktif terlebih dahulu</div>';
+      });
+      return;
+    }
+
+    const agg = this.aggregate();
+    this.renderLoadTable(agg);
+    this.renderByResTable(agg);
+    this.renderOverAlloc(agg);
+    this.renderChartLoad(agg);
+    this.populateHistSelect();
+    this.renderHistogram(agg);
+    this.bindEvents();
+  },
+
+  renderLoadTable: function(agg){
+    const tbl = document.getElementById('tblResourceLoad');
+    if (!tbl) return;
+
+    if (!agg.dates.length){
+      tbl.innerHTML =
+        '<thead><tr><th>Periode</th></tr></thead>' +
+        '<tbody><tr><td style="text-align:center;padding:30px;color:#8fa3c4;font-style:italic">' +
+        'Belum ada data. Pastikan item WBS memiliki <code>ahsp_id</code>, punya volume &amp; durasi, dan terhubung ke <code>project_ahsp_details</code>.<br>' +
+        'Jalankan <b>⚡ Recalculate CPM</b> di tab WBS dulu untuk mengisi tanggal.</td></tr></tbody>';
+      return;
+    }
+
+    // Top 15 resources
+    const resIds = Object.keys(agg.byResource)
+      .sort((a, b) => agg.byResource[b].total - agg.byResource[a].total)
+      .slice(0, 15);
+
+    let html = '<thead><tr>';
+    html += '<th style="position:sticky;left:0;z-index:6;background:#1f4e79;min-width:110px">Periode</th>';
+    resIds.forEach(rid => {
+      const r = this.getResById(rid) || {};
+      html += '<th style="text-align:right;min-width:90px" title="' + esc(r.nama || '') + '">' + esc(r.kode || rid) + '</th>';
+    });
+    html += '</tr></thead><tbody>';
+
+    agg.dates.forEach(pk => {
+      html += '<tr>';
+      html += '<td style="position:sticky;left:0;background:#0e1a30;color:#7cb3ff;font-weight:700;z-index:5">' +
+              esc(this.getPeriodLabel(pk, this.state.granularity)) + '</td>';
+      resIds.forEach(rid => {
+        const qty = (agg.byPeriod[pk] || {})[rid] || 0;
+        html += '<td class="num">' + (qty ? fmtNum(qty, 2) : '<span style="color:#475569">—</span>') + '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody>';
+    tbl.innerHTML = html;
+  },
+
+  renderByResTable: function(agg){
+    const tbl = document.getElementById('tblResourceByRes');
+    if (!tbl) return;
+
+    const rows = Object.keys(agg.byResource).map(rid => {
+      const r = this.getResById(rid) || {};
+      const data = agg.byResource[rid];
+      const cap = num(r.kapasitas_harian);
+      let peakDaily = data.peak;
+      if (this.state.granularity === 'weekly')  peakDaily = data.peak / 5;
+      else if (this.state.granularity === 'monthly') peakDaily = data.peak / 22;
+      const util = cap > 0 ? (peakDaily / cap) * 100 : null;
+      return { rid, r, data, cap, peakDaily, util };
+    }).sort((a, b) => b.data.total - a.data.total);
+
+    if (!rows.length){
+      tbl.innerHTML = '<thead><tr><th>Resource</th></tr></thead>' +
+        '<tbody><tr><td style="text-align:center;padding:30px;color:#8fa3c4;font-style:italic">Belum ada data</td></tr></tbody>';
+      return;
+    }
+
+    let html = '<thead><tr>';
+    html += '<th>Kode</th><th>Nama</th><th>Jenis</th><th>Satuan</th>';
+    html += '<th style="text-align:right">Total Qty</th>';
+    html += '<th style="text-align:right">Peak Harian</th>';
+    html += '<th style="text-align:right">Kapasitas</th>';
+    html += '<th style="text-align:center">Utilisasi</th>';
+    html += '<th style="text-align:right">Total Biaya</th>';
+    html += '</tr></thead><tbody>';
+
+    rows.forEach(o => {
+      const utilHtml = o.util === null
+        ? '<span style="color:#475569">—</span>'
+        : '<span class="' + (o.util > 100 ? 'neg' : o.util > 80 ? 'text-warn' : 'pos') +
+          '" style="font-weight:700">' + fmtNum(o.util, 1) + '%</span>';
+      html += '<tr>';
+      html += '<td><code style="color:#7cb3ff">' + esc(o.r.kode || '—') + '</code></td>';
+      html += '<td>' + esc(o.r.nama || '—') + '</td>';
+      html += '<td>' + badgeJenis_(o.r.jenis) + '</td>';
+      html += '<td>' + esc(o.r.satuan || '—') + '</td>';
+      html += '<td class="num">' + fmtNum(o.data.total, 2) + '</td>';
+      html += '<td class="num">' + fmtNum(o.peakDaily, 2) + '</td>';
+      html += '<td class="num">' + (o.cap > 0 ? fmtNum(o.cap, 2) : '<span style="color:#475569">—</span>') + '</td>';
+      html += '<td style="text-align:center">' + utilHtml + '</td>';
+      html += '<td class="num">' + fmtRp(o.data.biaya) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody>';
+    tbl.innerHTML = html;
+  },
+
+  renderOverAlloc: function(agg){
+    const wrap = document.getElementById('overAllocWrap');
+    if (!wrap) return;
+
+    const conflicts = this.detectOverAlloc(agg);
+    if (!conflicts.length){
+      wrap.innerHTML =
+        '<div class="alert ok"><span>✅</span><div><b>Tidak ada over-allocation</b><br>' +
+        'Semua resource dalam batas kapasitas, atau kolom <code>kapasitas_harian</code> belum diisi di Master Resources.</div></div>';
+      return;
+    }
+
+    let html = '<div class="alert warn"><span>⚠️</span><div><b>' + conflicts.length +
+               ' over-allocation terdeteksi</b><br>Resource berikut melebihi kapasitas harian (max tampil 30).</div></div>';
+
+    conflicts.slice(0, 30).forEach(c => {
+      html += '<div class="conflict-card warn">';
+      html += '<span>🚨</span><div>';
+      html += '<b>' + esc(c.resource_kode) + ' — ' + esc(c.resource_nama) + '</b>';
+      html += ' <span style="color:#8fa3c4">· ' + esc(c.periodKey) + '</span><br>';
+      html += '<span style="color:#e6edf7">Kebutuhan: <b>' + fmtNum(c.avgDaily, 2) + ' ' +
+              esc(c.resource_satuan) + '/hari</b></span>';
+      html += ' <span style="color:#8fa3c4">· Kapasitas: ' + fmtNum(c.kapasitas, 2) + '</span> ';
+      html += '<span class="badge b-danger">Over +' + fmtNum(c.over, 2) + ' (' + fmtNum(c.ratio * 100, 0) + '%)</span>';
+      html += '</div></div>';
+    });
+    wrap.innerHTML = html;
+  },
+
+  renderChartLoad: function(agg){
+    const cv = document.getElementById('chartResourceLoad');
+    if (!cv || typeof Chart === 'undefined') return;
+    if (this._chartLoad){ try { this._chartLoad.destroy(); } catch(e){} }
+
+    const dates = agg.dates;
+    const dataPeriode = dates.map(pk => {
+      let tot = 0;
+      Object.values(agg.byPeriod[pk] || {}).forEach(v => tot += v);
+      return tot;
+    });
+    let cum = 0;
+    const dataCum = dataPeriode.map(v => { cum += v; return cum; });
+
+    this._chartLoad = new Chart(cv.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: dates.map(pk => this.getPeriodLabel(pk, this.state.granularity)),
+        datasets: [
+          {
+            label: 'Qty per Periode',
+            data: dataPeriode,
+            backgroundColor: 'rgba(47,129,247,0.75)',
+            borderColor: '#2f81f7',
+            borderWidth: 1,
+            yAxisID: 'y'
+          },
+          {
+            label: 'Kumulatif',
+            data: dataCum,
+            type: 'line',
+            borderColor: '#f59e0b',
+            backgroundColor: 'rgba(245,158,11,0.15)',
+            borderWidth: 2,
+            tension: 0.3,
+            yAxisID: 'y1'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#e6edf7', font: { size: 11 } } } },
+        scales: {
+          x:  { ticks: { color: '#8fa3c4', font: { size: 10 } }, grid: { color: 'rgba(36,54,92,0.3)' } },
+          y:  { position: 'left',  ticks: { color: '#8fa3c4', font: { size: 10 } }, grid: { color: 'rgba(36,54,92,0.3)' } },
+          y1: { position: 'right', ticks: { color: '#f59e0b', font: { size: 10 } }, grid: { display: false } }
+        }
+      }
+    });
+  },
+
+  populateHistSelect: function(){
+    const sel = document.getElementById('histResource');
+    if (!sel) return;
+    const list = DB.master_resources || [];
+    sel.innerHTML = '<option value="">— Pilih Resource —</option>';
+    list.forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r.id;
+      opt.textContent = (r.kode || '') + ' — ' + (r.nama || '');
+      if (r.id === this.state.histResource) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  },
+
+  renderHistogram: function(agg){
+    const cv = document.getElementById('chartHistogram');
+    if (!cv || typeof Chart === 'undefined') return;
+    if (this._chartHist){ try { this._chartHist.destroy(); } catch(e){} }
+
+    const resId = this.state.histResource || Object.keys(agg.byResource)[0];
+    if (!resId) return;
+    const data = agg.byResource[resId];
+    if (!data) return;
+
+    const r = this.getResById(resId) || {};
+    const cap = num(r.kapasitas_harian);
+    const dates = agg.dates;
+    const labels = dates.map(pk => this.getPeriodLabel(pk, this.state.granularity));
+    const values = dates.map(pk => data.periods[pk] || 0);
+
+    const datasets = [{
+      label: 'Kebutuhan ' + (r.kode || ''),
+      data: values,
+      maxBarThickness: 60,        // ← BARU
+      categoryPercentage: 0.6,    // ← BARU
+      barPercentage: 0.9,         // ← BARU
+      backgroundColor: values.map(v => {
+        if (cap <= 0) return 'rgba(47,129,247,0.75)';
+        let avg = this.state.granularity === 'daily' ? v
+                : this.state.granularity === 'weekly' ? v / 5 : v / 22;
+        return avg > cap ? 'rgba(220,38,38,0.85)' : 'rgba(47,129,247,0.75)';
+      }),
+      borderColor: '#2f81f7',
+      borderWidth: 1
+    }];
+
+    if (cap > 0){
+      const capPeriod = this.state.granularity === 'daily' ? cap
+                     : this.state.granularity === 'weekly' ? cap * 5 : cap * 22;
+      datasets.push({
+        label: 'Kapasitas (' + fmtNum(capPeriod, 0) + ')',
+        data: dates.map(() => capPeriod),
+        type: 'line',
+        borderColor: '#dc2626',
+        borderDash: [6, 4],
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: false
+      });
+    }
+
+    this._chartHist = new Chart(cv.getContext('2d'), {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#e6edf7', font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: '#8fa3c4', font: { size: 10 } }, grid: { color: 'rgba(36,54,92,0.3)' } },
+          y: { beginAtZero: true, ticks: { color: '#8fa3c4', font: { size: 10 } }, grid: { color: 'rgba(36,54,92,0.3)' } }
+        }
+      }
+    });
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     BAGIAN 4 — EVENT BINDING
+     ═══════════════════════════════════════════════════════════ */
+  bindEvents: function(){
+    const self = this;
+
+    const sg = document.getElementById('schedGranularity');
+    if (sg && !sg._rlBound){
+      sg._rlBound = true;
+      sg.addEventListener('change', function(){
+        self.state.granularity = this.value;
+        const hg = document.getElementById('histGranularity');
+        if (hg) hg.value = this.value;
+        self.renderAll();
+      });
+    }
+
+    const sm = document.getElementById('schedMode');
+    if (sm && !sm._rlBound){
+      sm._rlBound = true;
+      sm.addEventListener('change', function(){
+        self.state.mode = this.value;
+        self.renderAll();
+      });
+    }
+
+    const hr = document.getElementById('histResource');
+    if (hr && !hr._rlBound){
+      hr._rlBound = true;
+      hr.addEventListener('change', function(){
+        self.state.histResource = this.value;
+        self.renderHistogram(self.aggregate());
+      });
+    }
+
+    const hg = document.getElementById('histGranularity');
+    if (hg && !hg._rlBound){
+      hg._rlBound = true;
+      hg.addEventListener('change', function(){
+        self.state.granularity = this.value;
+        const sg2 = document.getElementById('schedGranularity');
+        if (sg2) sg2.value = this.value;
+        // Render ulang semua panel dengan granularity baru
+        const agg = self.aggregate();
+        self.renderLoadTable(agg);
+        self.renderByResTable(agg);
+        self.renderOverAlloc(agg);
+        self.renderChartLoad(agg);
+        self.renderHistogram(agg);   // ← ini yang perlu re-render dengan agg baru
+      });
+    }
+  }
+};
+
+window.ResourceLoading = ResourceLoading;
+
+/* ── Hook dipanggil dari renderSchedule ── */
+function renderResourceLoading(){
+  ResourceLoading.renderAll();
+}
+
+console.log('[ScheduleJs_04_Resource] Module loaded.');
+</script>
