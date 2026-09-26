@@ -1,0 +1,442 @@
+<script>
+/* =====================================================================
+   ScheduleJs_05_Baseline.html — BASELINE & VARIANCE
+   - Save baseline snapshot ke 3 slot (BL1, BL2, BL3)
+   - Clear baseline
+   - Compute variance: current vs baseline per task
+   - Tabel variance + KPI
+   ===================================================================== */
+var BaselineManager = {
+
+  state: {
+    activeSlot: 1,
+    filter: 'all'   // all | late | early | ontime
+  },
+
+  SLOTS: [
+    { key: 1, code: 'BL1', label: 'Baseline 1', color: '#2f81f7', prefix: 'bl1_' },
+    { key: 2, code: 'BL2', label: 'Baseline 2', color: '#1abc9c', prefix: 'bl2_' },
+    { key: 3, code: 'BL3', label: 'Baseline 3', color: '#a855f7', prefix: 'bl3_' }
+  ],
+
+  /* ═══════════════════════════════════════════════════════════
+     HELPERS
+     ═══════════════════════════════════════════════════════════ */
+  getProjectTasks: function(){
+    const pid = APP_STATE.activeProjectId;
+    if (!pid) return [];
+    return (DB.project_wbs || [])
+      .filter(w => String(w.project_id) === String(pid) && !num(w.is_group))
+      .sort((a, b) => num(a.urut) - num(b.urut));
+  },
+
+  getSlotInfo: function(slotKey){
+    return this.SLOTS.find(s => s.key === slotKey) || this.SLOTS[0];
+  },
+
+  getBaselineData: function(task, slotKey){
+    const info = this.getSlotInfo(slotKey);
+    const s = task[info.prefix + 'start'];
+    const f = task[info.prefix + 'finish'];
+    const setAt = task[info.prefix + 'set_at'];
+    return {
+      start: s || null,
+      finish: f || null,
+      setAt: setAt || null,
+      has: !!(s && f)
+    };
+  },
+
+  getCurrentDates: function(task){
+    return {
+      start: task.tgl_mulai_rencana || task.start_date || null,
+      finish: task.tgl_selesai_rencana || task.finish_date || null
+    };
+  },
+
+  diffDays: function(isoA, isoB){
+    if (!isoA || !isoB) return null;
+    const a = new Date(isoA + 'T00:00:00');
+    const b = new Date(isoB + 'T00:00:00');
+    if (isNaN(a) || isNaN(b)) return null;
+    return Math.round((a - b) / 86400000);
+  },
+
+  countSetBaselines: function(){
+    const tasks = this.getProjectTasks();
+    const counts = { 1: 0, 2: 0, 3: 0 };
+    tasks.forEach(t => {
+      this.SLOTS.forEach(s => {
+        if (t[s.prefix + 'start'] && t[s.prefix + 'finish']) counts[s.key]++;
+      });
+    });
+    return { counts, total: tasks.length };
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     SAVE / CLEAR BASELINE
+     ═══════════════════════════════════════════════════════════ */
+  saveBaseline: function(slotKey){
+    const tasks = this.getProjectTasks();
+    if (!tasks.length){
+      toast('Tidak ada task pada proyek ini', 'warn');
+      return;
+    }
+    const info = this.getSlotInfo(slotKey);
+
+    const filled = tasks.filter(t => {
+      const cur = this.getCurrentDates(t);
+      return cur.start && cur.finish;
+    }).length;
+
+    if (!filled){
+      toast('Belum ada task dengan tanggal. Jalankan CPM dulu.', 'warn');
+      return;
+    }
+
+    const msg = 'Simpan snapshot jadwal saat ini ke ' + info.code + '?\n\n' +
+                'Task terisi: ' + filled + ' dari ' + tasks.length + '\n' +
+                'Data lama di slot ini akan ditimpa.';
+    if (!confirm(msg)) return;
+
+    const now = new Date().toISOString();
+    const user = APP_STATE.user ? APP_STATE.user.username : 'system';
+    let count = 0;
+
+    tasks.forEach(t => {
+      const cur = this.getCurrentDates(t);
+      if (!cur.start || !cur.finish) return;
+      t[info.prefix + 'start']  = cur.start;
+      t[info.prefix + 'finish'] = cur.finish;
+      t[info.prefix + 'set_at'] = now;
+      t.updated_at = now;
+      t.updated_by = user;
+      count++;
+    });
+
+    markDirty();
+    this.render();
+    toast('✅ ' + info.code + ' tersimpan: ' + count + ' task');
+  },
+
+  clearBaseline: function(slotKey){
+    const info = this.getSlotInfo(slotKey);
+    if (!confirm('Hapus semua data ' + info.code + '?')) return;
+    const tasks = this.getProjectTasks();
+    tasks.forEach(t => {
+      delete t[info.prefix + 'start'];
+      delete t[info.prefix + 'finish'];
+      delete t[info.prefix + 'set_at'];
+    });
+    markDirty();
+    this.render();
+    toast('🗑 ' + info.code + ' dihapus');
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     VARIANCE COMPUTATION
+     ═══════════════════════════════════════════════════════════ */
+  computeVariance: function(slotKey){
+    const tasks = this.getProjectTasks();
+    const rows = [];
+
+    tasks.forEach(t => {
+      const bl = this.getBaselineData(t, slotKey);
+      if (!bl.has) return;
+
+      const cur = this.getCurrentDates(t);
+      const dStart  = this.diffDays(cur.start,  bl.start);
+      const dFinish = this.diffDays(cur.finish, bl.finish);
+
+      let status = 'ontime';
+      if (dFinish === null){
+        status = 'unknown';
+      } else if (dFinish > 0){
+        status = 'late';
+      } else if (dFinish < 0){
+        status = 'early';
+      }
+
+      rows.push({
+        task: t,
+        blStart: bl.start,
+        blFinish: bl.finish,
+        curStart: cur.start,
+        curFinish: cur.finish,
+        dStart: dStart,
+        dFinish: dFinish,
+        status: status
+      });
+    });
+
+    rows.sort((a, b) => {
+      const absA = Math.abs(a.dFinish || 0);
+      const absB = Math.abs(b.dFinish || 0);
+      return absB - absA;
+    });
+
+    return rows;
+  },
+
+  getVarianceSummary: function(rows){
+    let late = 0, early = 0, ontime = 0;
+    let worstDelay = 0, worstTask = null;
+    rows.forEach(r => {
+      if (r.status === 'late'){
+        late++;
+        if (r.dFinish > worstDelay){ worstDelay = r.dFinish; worstTask = r.task; }
+      } else if (r.status === 'early'){
+        early++;
+      } else if (r.status === 'ontime'){
+        ontime++;
+      }
+    });
+    return { late, early, ontime, total: rows.length, worstDelay, worstTask };
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     RENDER
+     ═══════════════════════════════════════════════════════════ */
+  render: function(){
+    const wrap = document.getElementById('baselinePanel');
+    if (!wrap) return;
+
+    if (!APP_STATE.activeProjectId){
+      wrap.innerHTML = '<div style="padding:30px;text-align:center;color:#8fa3c4">Pilih proyek aktif terlebih dahulu</div>';
+      return;
+    }
+
+    const tasks = this.getProjectTasks();
+    if (!tasks.length){
+      wrap.innerHTML = '<div style="padding:30px;text-align:center;color:#8fa3c4;font-style:italic">Belum ada item WBS pada proyek ini</div>';
+      return;
+    }
+
+    const { counts, total } = this.countSetBaselines();
+
+    let html = '';
+    html += '<div class="panel-head">';
+    html +=   '<div>';
+    html +=     '<h2>📐 Baseline Management</h2>';
+    html +=     '<p>Simpan snapshot jadwal untuk perbandingan & variance analysis</p>';
+    html +=   '</div>';
+    html +=   '<button class="btn btn-sm" id="blRefresh">🔄 Refresh</button>';
+    html += '</div>';
+
+    // 3 Cards
+    html += '<div class="grid g3" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:16px">';
+    this.SLOTS.forEach(s => {
+      html += this.buildSlotCard(s, counts[s.key], total);
+    });
+    html += '</div>';
+
+    // Variance panel
+    html += '<div class="panel-head" style="margin-top:20px">';
+    html +=   '<div>';
+    html +=     '<h3>📊 Variance Analysis</h3>';
+    html +=     '<p>Selisih jadwal saat ini terhadap baseline terpilih</p>';
+    html +=   '</div>';
+    html += '</div>';
+
+    html += '<div class="row" style="margin-bottom:12px;align-items:center">';
+    html +=   '<label class="f" style="margin:0">Baseline</label>';
+    html +=   '<select id="blActiveSlot" style="width:180px">';
+    this.SLOTS.forEach(s => {
+      const hasData = counts[s.key] > 0;
+      html += '<option value="' + s.key + '"' + (s.key === this.state.activeSlot ? ' selected' : '') + (hasData ? '' : ' disabled') + '>' + s.code + ' — ' + s.label + (hasData ? '' : ' (kosong)') + '</option>';
+    });
+    html +=   '</select>';
+
+    html +=   '<label class="f" style="margin:0 0 0 12px">Filter</label>';
+    html +=   '<select id="blFilter" style="width:140px">';
+    html +=     '<option value="all"' + (this.state.filter === 'all' ? ' selected' : '') + '>Semua</option>';
+    html +=     '<option value="late"' + (this.state.filter === 'late' ? ' selected' : '') + '>Terlambat</option>';
+    html +=     '<option value="early"' + (this.state.filter === 'early' ? ' selected' : '') + '>Lebih Cepat</option>';
+    html +=     '<option value="ontime"' + (this.state.filter === 'ontime' ? ' selected' : '') + '>Sesuai</option>';
+    html +=   '</select>';
+    html += '</div>';
+
+    // Variance content
+    const rows = this.computeVariance(this.state.activeSlot);
+    if (!rows.length){
+      html += '<div class="alert info"><span>ℹ️</span><div>Belum ada data baseline di slot <b>' +
+              this.getSlotInfo(this.state.activeSlot).code + '</b>. Klik <b>💾 Save</b> di salah satu kartu di atas.</div></div>';
+    } else {
+      html += this.buildVarianceSummary(rows);
+      html += this.buildVarianceTable(rows);
+    }
+
+    wrap.innerHTML = html;
+    this.bindEvents();
+  },
+
+  buildSlotCard: function(slot, count, total){
+    const filled = count > 0;
+    const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+    const sampleTask = this.getProjectTasks()[0];
+    const sample = sampleTask ? this.getBaselineData(sampleTask, slot.key) : { setAt: null };
+
+    let html = '<div class="kpi" style="position:relative;overflow:hidden">';
+    html += '<div style="position:absolute;top:0;left:0;width:4px;height:100%;background:' + slot.color + '"></div>';
+    html += '<div class="lbl" style="color:' + slot.color + '">' + slot.code + '</div>';
+    html += '<div class="val" style="font-size:15px">' + slot.label + '</div>';
+
+    if (filled){
+      html += '<div class="sub" style="margin-top:6px"><b style="color:#4ade80">✓ ' + count + ' task</b> tersimpan (' + pct + '%)</div>';
+      if (sample.setAt){
+        const tgl = new Date(sample.setAt).toLocaleDateString('id-ID', { day:'2-digit', month:'short', year:'numeric' });
+        html += '<div style="font-size:10.5px;color:#8fa3c4;margin-top:2px">📅 ' + tgl + '</div>';
+      }
+    } else {
+      html += '<div class="sub" style="margin-top:6px;color:#8fa3c4">Belum ada snapshot</div>';
+      html += '<div style="font-size:10.5px;color:#64748b;margin-top:2px">—</div>';
+    }
+
+    html += '<div style="margin-top:12px;display:flex;gap:6px">';
+    html += '<button class="btn btn-sm" data-bl-action="save" data-bl-slot="' + slot.key + '" style="flex:1;justify-content:center">💾 Save</button>';
+    if (filled){
+      html += '<button class="btn btn-sm" data-bl-action="clear" data-bl-slot="' + slot.key + '" style="color:#f87171">🗑</button>';
+    }
+    html += '</div>';
+
+    html += '</div>';
+    return html;
+  },
+
+  buildVarianceSummary: function(rows){
+    const s = this.getVarianceSummary(rows);
+    let html = '<div class="grid g4" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px">';
+
+    html += '<div class="kpi"><div class="lbl">Total Task</div><div class="val">' + s.total + '</div></div>';
+    html += '<div class="kpi k5"><div class="lbl">Sesuai</div><div class="val" style="color:#4ade80">' + s.ontime + '</div></div>';
+    html += '<div class="kpi k3"><div class="lbl">Lebih Cepat</div><div class="val" style="color:#4ade80">' + s.early + '</div></div>';
+    html += '<div class="kpi k4"><div class="lbl">Terlambat</div><div class="val" style="color:#f87171">' + s.late + '</div>';
+
+    if (s.worstDelay > 0 && s.worstTask){
+      html += '<div class="sub" style="color:#f87171;font-size:10.5px">Max: +' + s.worstDelay + ' hari<br>(' + esc(s.worstTask.kode_wbs || '') + ')</div>';
+    }
+    html += '</div>';
+    html += '</div>';
+    return html;
+  },
+
+  buildVarianceTable: function(rows){
+    if (this.state.filter !== 'all'){
+      rows = rows.filter(r => r.status === this.state.filter);
+    }
+    if (!rows.length){
+      return '<div class="alert info"><span>ℹ️</span><div>Tidak ada task yang cocok dengan filter.</div></div>';
+    }
+
+    let html = '<div class="tw" style="max-height:50vh"><table>';
+    html += '<thead><tr>';
+    html += '<th>Kode</th>';
+    html += '<th>Uraian</th>';
+    html += '<th style="text-align:center">BL Start</th>';
+    html += '<th style="text-align:center">Cur Start</th>';
+    html += '<th style="text-align:center">Δ Start</th>';
+    html += '<th style="text-align:center">BL Finish</th>';
+    html += '<th style="text-align:center">Cur Finish</th>';
+    html += '<th style="text-align:center">Δ Finish</th>';
+    html += '<th style="text-align:center">Status</th>';
+    html += '</tr></thead><tbody>';
+
+    rows.forEach(r => {
+      const cls = r.status === 'late' ? 'critical-row' : '';
+      html += '<tr class="' + cls + '">';
+      html += '<td><code style="color:#7cb3ff;font-weight:700">' + esc(r.task.kode_wbs || '—') + '</code></td>';
+      html += '<td>' + esc(r.task.uraian || '—') + '</td>';
+      html += '<td style="text-align:center;color:#a8b8d6;font-size:11px">' + esc(r.blStart || '—') + '</td>';
+      html += '<td style="text-align:center;color:#e6edf7;font-size:11px">' + esc(r.curStart || '—') + '</td>';
+      html += '<td style="text-align:center">' + this.formatDelta(r.dStart) + '</td>';
+      html += '<td style="text-align:center;color:#a8b8d6;font-size:11px">' + esc(r.blFinish || '—') + '</td>';
+      html += '<td style="text-align:center;color:#e6edf7;font-size:11px">' + esc(r.curFinish || '—') + '</td>';
+      html += '<td style="text-align:center">' + this.formatDelta(r.dFinish) + '</td>';
+      html += '<td style="text-align:center">' + this.formatStatusBadge(r.status) + '</td>';
+      html += '</tr>';
+    });
+
+    html += '</tbody></table></div>';
+    return html;
+  },
+
+  formatDelta: function(d){
+    if (d === null || d === undefined) return '<span style="color:#475569">—</span>';
+    if (d === 0) return '<span style="color:#7cb3ff;font-weight:700">0</span>';
+    const abs = Math.abs(d);
+    if (d > 0) return '<span style="color:#f87171;font-weight:700">+' + abs + ' hari</span>';
+    return '<span style="color:#4ade80;font-weight:700">−' + abs + ' hari</span>';
+  },
+
+  formatStatusBadge: function(status){
+    const map = {
+      'late':    { label: 'Terlambat', cls: 'b-danger' },
+      'early':   { label: 'Cepat',     cls: 'b-ok' },
+      'ontime':  { label: 'Sesuai',    cls: 'b-info' },
+      'unknown': { label: 'N/A',       cls: '' }
+    };
+    const m = map[status] || map.unknown;
+    if (!m.cls) return '<span style="color:#475569">—</span>';
+    return '<span class="badge ' + m.cls + '">' + m.label + '</span>';
+  },
+
+  /* ═══════════════════════════════════════════════════════════
+     EVENT BINDING
+     ═══════════════════════════════════════════════════════════ */
+  bindEvents: function(){
+    const self = this;
+
+    // Save / Clear buttons in cards
+    document.querySelectorAll('[data-bl-action]').forEach(btn => {
+      // Prevent double bind
+      if (btn._blBound) return;
+      btn._blBound = true;
+      btn.addEventListener('click', function(){
+        const action = this.dataset.blAction;
+        const slot = parseInt(this.dataset.blSlot, 10);
+        if (action === 'save') self.saveBaseline(slot);
+        else if (action === 'clear') self.clearBaseline(slot);
+      });
+    });
+
+    // Active slot dropdown
+    const sel = document.getElementById('blActiveSlot');
+    if (sel && !sel._blBound){
+      sel._blBound = true;
+      sel.addEventListener('change', function(){
+        self.state.activeSlot = parseInt(this.value, 10);
+        self.render();
+      });
+    }
+
+    // Filter dropdown
+    const fil = document.getElementById('blFilter');
+    if (fil && !fil._blBound){
+      fil._blBound = true;
+      fil.addEventListener('change', function(){
+        self.state.filter = this.value;
+        self.render();
+      });
+    }
+
+    // Refresh button
+    const ref = document.getElementById('blRefresh');
+    if (ref && !ref._blBound){
+      ref._blBound = true;
+      ref.addEventListener('click', function(){
+        self.render();
+        toast('🔄 Baseline panel refreshed');
+      });
+    }
+  }
+};
+
+window.BaselineManager = BaselineManager;
+
+/* ── Hook dipanggil dari renderSchedule ── */
+function renderBaseline(){
+  BaselineManager.render();
+}
+
+console.log('[ScheduleJs_05_Baseline] Module loaded.');
+</script>
