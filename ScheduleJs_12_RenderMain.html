@@ -923,8 +923,8 @@ function bindRenderEvents(){
   if (btnReport && !btnReport._repBound){
     btnReport._repBound = true;
     btnReport.addEventListener('click', function(){
-      if (typeof Reporting !== 'undefined' && Reporting.open) Reporting.open();
-      else toast('Modul Reporting belum siap', 'warn');
+      if (typeof Rep !== 'undefined' && Rep.open) Rep.open();
+      else toast('Modul Report belum siap', 'warn');
     });
   }
 
