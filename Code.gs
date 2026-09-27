@@ -2261,7 +2261,7 @@ function findBrokenModule(){
     'AutosaveCoreJs', 'AutosaveUiJs',
     'KbShortcuts2Js',
     'RpCoreJs', 'RpOpenJs', 'RpDialogJs',
-    'RpGenerateJs', 'RpWrapperJs', 'RpWrapper1Js', 'RpWrapper2Js', 'RpCss1Js', 'RpCss2Js', 'RpExecJs'
+    'RpGenerateJs', 'RpWrapperJs', 'RpCss1Js', 'RpCss2Js', 'RpExecJs'
   ];
 
   var cumulative = '';
