@@ -814,6 +814,49 @@ function doPost(e) {
       });
     }
 
+        /* ── CHECK PROJECT VERSIONS (untuk Sync Manager) ── */
+    if (action === 'checkProjectVersions') {
+      const serverVer = getDbVersion_();
+      const clientVer = parseInt(pl.clientVersion, 10) || 0;
+
+      // Fast path: kalau versi sama → skip baca sheet (hemat!)
+      if (serverVer === clientVer) {
+        return json_({
+          ok: true,
+          unchanged: true,
+          dbVersion: serverVer
+        });
+      }
+
+      // Ada perubahan → baca sheet projects (hanya kolom penting)
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const sh = ss.getSheetByName('projects');
+      const versions = {};
+      if (sh && sh.getLastRow() > 1) {
+        const data = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn()).getValues();
+        const hdr = data[0].map(function(h){ return String(h).trim(); });
+        const idxId = hdr.indexOf('id');
+        const idxVer = hdr.indexOf('project_version');
+        const idxBy = hdr.indexOf('updated_by');
+        const idxAt = hdr.indexOf('updated_at');
+        for (let i = 1; i < data.length; i++){
+          const id = data[i][idxId];
+          if (!id) continue;
+          versions[String(id)] = {
+            version: idxVer >= 0 ? (parseInt(data[i][idxVer], 10) || 0) : 0,
+            updated_by: idxBy >= 0 ? String(data[i][idxBy] || '') : '',
+            updated_at: idxAt >= 0 ? String(data[i][idxAt] || '') : ''
+          };
+        }
+      }
+      return json_({
+        ok: true,
+        unchanged: false,
+        versions: versions,
+        dbVersion: serverVer
+      });
+    }
+
     /* ═══════════════════════════════════════════════════════════
        FASE 4B — PUSH PER PROYEK (Partial Push)
        Hanya kirim slice 1 proyek → tidak ganggu proyek lain
@@ -1151,6 +1194,16 @@ function doPost(e) {
       const v = validateDb_(db);
       if (!v.ok){
         return json_({ ok:false, message: 'Validasi gagal: ' + v.message });
+      }
+
+      // ── NEW: Increment project_version untuk setiap proyek ──
+      const nowIso = new Date().toISOString();
+      if (Array.isArray(v.cleaned.projects)){
+        v.cleaned.projects.forEach(function(p){
+          p.project_version = (parseInt(p.project_version, 10) || 0) + 1;
+          if (!p.updated_at) p.updated_at = nowIso;
+          if (!p.updated_by) p.updated_by = 'push';
+        });
       }
 
       backupSnapshot_(v.cleaned, settings);
@@ -2104,6 +2157,8 @@ function doGet(e) {
     'KeyboardShortcutsJs', 'KbShortcuts2Js',    'AutosaveCoreJs', 'AutosaveUiJs',    'SyncManagerCoreJs', 'SyncManagerUiJs', 'TaskInspectorCoreJs', 'TaskInspectorUiJs',
     'PortfolioTimelineDataJs', 'PortfolioTimelineDrawJs', 'PortfolioTimelineUiJs',
     'HistoryCoreJs', 'HistoryUiJs',
+    'RpCoreJs', 'RpOpenJs', 'RpDialogJs', 'RpGenerateJs', 'RpWrapperJs',
+    'RpCss1Js', 'RpCss2Js', 'RpExecJs',
     'Fase1COverride', 'MultiUserJs'
   ];
 
@@ -2198,7 +2253,15 @@ function findBrokenModule(){
     'ScheduleJs_12_RenderMain',
     'TrackingJs', 'ProgressWizardJs',
     'PortfolioTimelineJs', 'KeyboardShortcutsJs', 'Fase1COverride', 'MultiUserJs',
-    'ReportCoreJs', 'ReportExecutiveJs'
+    'ReportCoreJs', 'ReportExecutiveJs',
+    'PortfolioTimelineDataJs', 'PortfolioTimelineDrawJs', 'PortfolioTimelineUiJs',
+    'HistoryCoreJs', 'HistoryUiJs',
+    'SyncManagerCoreJs', 'SyncManagerUiJs',
+    'TaskInspectorCoreJs', 'TaskInspectorUiJs',
+    'AutosaveCoreJs', 'AutosaveUiJs',
+    'KbShortcuts2Js',
+    'RpCoreJs', 'RpOpenJs', 'RpDialogJs',
+    'RpGenerateJs', 'RpWrapperJs', 'RpWrapper1Js', 'RpWrapper2Js', 'RpCss1Js', 'RpCss2Js', 'RpExecJs'
   ];
 
   var cumulative = '';
