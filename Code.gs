@@ -2157,8 +2157,11 @@ function doGet(e) {
     'KeyboardShortcutsJs', 'KbShortcuts2Js',    'AutosaveCoreJs', 'AutosaveUiJs',    'SyncManagerCoreJs', 'SyncManagerUiJs', 'TaskInspectorCoreJs', 'TaskInspectorUiJs',
     'PortfolioTimelineDataJs', 'PortfolioTimelineDrawJs', 'PortfolioTimelineUiJs',
     'HistoryCoreJs', 'HistoryUiJs',
-    'RpCoreJs', 'RpOpenJs', 'RpDialogJs', 'RpGenerateJs', 'RpWrapperJs',
+    /* RP DISABLED:
+    'RpCoreJs', 'RpOpenJs', 'RpDialogJs', 'RpGenerateJs', 'RpWrapperSimpleJs',
     'RpCss1Js', 'RpCss2Js', 'RpExecJs',
+    */
+    'ReportA1Js', 'ReportA2Js', 'ReportA3Js',
     'Fase1COverride', 'MultiUserJs'
   ];
 
